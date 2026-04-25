@@ -3,10 +3,10 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { batchCallingService } from '../services/batchCalling.service';
 import mongoose from 'mongoose';
 
-export class BatchCallingController {
-  private readonly MAX_RECIPIENTS = 10000;
-  private readonly ELEVENLABS_BATCH_SIZE = 500;
+const MAX_RECIPIENTS = 10000;
+const ELEVENLABS_BATCH_SIZE = 500;
 
+export class BatchCallingController {
   /**
    * Submit batch calling job
    * POST /api/v1/batch-calling/submit
@@ -143,11 +143,11 @@ export class BatchCallingController {
         }
       }
 
-      if (recipients.length > this.MAX_RECIPIENTS) {
+      if (recipients.length > MAX_RECIPIENTS) {
         return res.status(422).json({
           detail: [{
             loc: ["body", "recipients"],
-            msg: `Maximum ${this.MAX_RECIPIENTS} recipients allowed per submission`,
+            msg: `Maximum ${MAX_RECIPIENTS} recipients allowed per submission`,
             type: "value_error"
           }]
         });
@@ -190,7 +190,7 @@ export class BatchCallingController {
       };
 
       const preparedRecipients = prepareRecipients(recipients);
-      const recipientChunks = chunkRecipients(preparedRecipients, this.ELEVENLABS_BATCH_SIZE);
+      const recipientChunks = chunkRecipients(preparedRecipients, ELEVENLABS_BATCH_SIZE);
       const totalChunks = recipientChunks.length;
       const isChunkedSubmission = totalChunks > 1;
 
@@ -256,7 +256,7 @@ export class BatchCallingController {
             job_ids: queuedJobs,
             total_jobs: queuedJobs.length,
             recipients_count: recipients.length,
-            chunk_size: this.ELEVENLABS_BATCH_SIZE,
+            chunk_size: ELEVENLABS_BATCH_SIZE,
             status: 'queued'
           });
         }
@@ -395,7 +395,7 @@ export class BatchCallingController {
         success: true,
         message: `Batch call split into ${submittedChunkResults.length} ElevenLabs batches`,
         total_requested_recipients: recipients.length,
-        chunk_size: this.ELEVENLABS_BATCH_SIZE,
+        chunk_size: ELEVENLABS_BATCH_SIZE,
         total_batches_created: submittedChunkResults.length,
         batch_ids: submittedChunkResults.map((chunk) => chunk.result.id)
       });
