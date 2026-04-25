@@ -13,8 +13,8 @@ export class AuthController {
 
   signup = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
-      const { name, email, password } = req.body;
-      const result = await this.authService.signup(name, email, password);
+      const { name, email, password, captchaToken } = req.body;
+      const result = await this.authService.signup(name, email, password, captchaToken, req.ip);
       res.json(successResponse(result, 'Signup successful'));
     } catch (error) {
       next(error);
@@ -23,8 +23,8 @@ export class AuthController {
 
   login = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
-      const { email, password } = req.body;
-      const result = await this.authService.login(email, password);
+      const { email, password, captchaToken } = req.body;
+      const result = await this.authService.login(email, password, captchaToken, req.ip);
       res.json(successResponse(result, 'Login successful'));
     } catch (error) {
       next(error);

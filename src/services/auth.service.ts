@@ -38,6 +38,7 @@ import KnowledgeBase from '../models/KnowledgeBase';
 import CSVImport from '../models/CSVImport';
 import InboundNumber from '../models/InboundNumber';
 import { getPlanLimits } from '../config/planLimits';
+import { verifyCaptchaToken } from '../utils/captcha.util';
 
 export class AuthService {
   // In-memory store as fallback when Redis is not available
@@ -98,8 +99,9 @@ export class AuthService {
   }
 
   // Signup
-  async signup(name: string, email: string, password: string) {
+  async signup(name: string, email: string, password: string, captchaToken: string, remoteIp?: string) {
     console.log('[Auth] Signup attempt:', { email, hasPassword: !!password });
+    await verifyCaptchaToken(captchaToken, remoteIp);
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -157,8 +159,9 @@ export class AuthService {
   }
 
   // Login
-  async login(email: string, password: string) {
+  async login(email: string, password: string, captchaToken: string, remoteIp?: string) {
     console.log('[Auth] Login attempt:', { email, hasPassword: !!password });
+    await verifyCaptchaToken(captchaToken, remoteIp);
 
     const user = await User.findOne({ email, status: 'active' });
 

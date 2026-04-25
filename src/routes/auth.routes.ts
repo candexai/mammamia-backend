@@ -16,7 +16,8 @@ const signupValidation = [
     .isEmail()
     .normalizeEmail()
     .withMessage('Please provide a valid email'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('captchaToken').trim().notEmpty().withMessage('Captcha verification is required')
 ];
 
 const loginValidation = [
@@ -26,7 +27,8 @@ const loginValidation = [
     .isEmail()
     .normalizeEmail()
     .withMessage('Please provide a valid email'),
-  body('password').trim().notEmpty().withMessage('Password is required')
+  body('password').trim().notEmpty().withMessage('Password is required'),
+  body('captchaToken').trim().notEmpty().withMessage('Captcha verification is required')
 ];
 
 const refreshTokenValidation = [

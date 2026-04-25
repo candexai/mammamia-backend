@@ -4,6 +4,9 @@ import { batchCallingService } from '../services/batchCalling.service';
 import mongoose from 'mongoose';
 
 export class BatchCallingController {
+  private readonly MAX_RECIPIENTS = 10000;
+  private readonly ELEVENLABS_BATCH_SIZE = 500;
+
   /**
    * Submit batch calling job
    * POST /api/v1/batch-calling/submit
@@ -140,6 +143,16 @@ export class BatchCallingController {
         }
       }
 
+      if (recipients.length > this.MAX_RECIPIENTS) {
+        return res.status(422).json({
+          detail: [{
+            loc: ["body", "recipients"],
+            msg: `Maximum ${this.MAX_RECIPIENTS} recipients allowed per submission`,
+            type: "value_error"
+          }]
+        });
+      }
+
       // Helper to prepare recipients payload
       const prepareRecipients = (recipientsList: any[]) => {
         return recipientsList.map((r: any) => {
@@ -162,14 +175,33 @@ export class BatchCallingController {
         });
       };
 
+      // Split recipients into ElevenLabs-safe chunks (max 500 each)
+      const chunkRecipients = (list: any[], chunkSize: number) => {
+        const chunks: any[][] = [];
+        for (let i = 0; i < list.length; i += chunkSize) {
+          chunks.push(list.slice(i, i + chunkSize));
+        }
+        return chunks;
+      };
+
+      const getChunkCallName = (baseName: string, chunkIndex: number, totalChunks: number) => {
+        if (totalChunks <= 1) return baseName;
+        return `${baseName} (Batch ${chunkIndex + 1}/${totalChunks})`;
+      };
+
+      const preparedRecipients = prepareRecipients(recipients);
+      const recipientChunks = chunkRecipients(preparedRecipients, this.ELEVENLABS_BATCH_SIZE);
+      const totalChunks = recipientChunks.length;
+      const isChunkedSubmission = totalChunks > 1;
+
       // Helper to submit batch call (used for initial attempt and retry after re-register)
-      const doSubmit = (elevenLabsId: string) => {
+      const doSubmit = (elevenLabsId: string, chunkRecipientsPayload: any[], chunkCallName: string) => {
         // Build payload with ONLY the required fields - no transformations, no enrichment
         const payload = {
           agent_id,
-          call_name,
+          call_name: chunkCallName,
           phone_number_id: elevenLabsId,
-          recipients: prepareRecipients(recipients)
+          recipients: chunkRecipientsPayload
         };
 
         // Log summary only (no PII – do not log full recipient list)
@@ -189,34 +221,44 @@ export class BatchCallingController {
       if (queueAvailable) {
         console.log('[Batch Calling Controller] 🚀 Queue available - enqueueing batch call job for background processing');
         console.log('[Batch Calling Controller] Recipients count:', recipients.length);
-        
-        // Prepare recipients for queue
-        const preparedRecipients = prepareRecipients(recipients);
-        
-        // Enqueue job
-        const job = await enqueueBatchCall({
-          agent_id,
-          call_name,
-          recipients: preparedRecipients,
-          phone_number_id: elevenlabsPhoneNumberId,
-          userId,
-          organizationId
-        });
 
-        if (job) {
-          console.log('[Batch Calling Controller] ✅ Batch call job enqueued:', job.id);
-          
-          // Return immediately with job info (batch will be processed in background)
+        const queuedJobs: string[] = [];
+
+        for (let i = 0; i < recipientChunks.length; i++) {
+          const recipientsChunk = recipientChunks[i];
+          const chunkCallName = getChunkCallName(call_name, i, totalChunks);
+
+          const job = await enqueueBatchCall({
+            agent_id,
+            call_name: chunkCallName,
+            recipients: recipientsChunk,
+            phone_number_id: elevenlabsPhoneNumberId,
+            userId,
+            organizationId
+          });
+
+          if (job) {
+            queuedJobs.push(job.id.toString());
+          } else {
+            console.warn('[Batch Calling Controller] ⚠️  Failed to enqueue one chunk, falling back to synchronous processing');
+            queuedJobs.length = 0;
+            break;
+          }
+        }
+
+        if (queuedJobs.length === totalChunks) {
+          console.log('[Batch Calling Controller] ✅ All batch call chunks enqueued:', queuedJobs.length);
           return res.status(202).json({
             success: true,
-            message: 'Batch call job enqueued for processing',
-            job_id: job.id.toString(),
+            message: isChunkedSubmission
+              ? `Batch call split into ${totalChunks} jobs and enqueued`
+              : 'Batch call job enqueued for processing',
+            job_ids: queuedJobs,
+            total_jobs: queuedJobs.length,
             recipients_count: recipients.length,
+            chunk_size: this.ELEVENLABS_BATCH_SIZE,
             status: 'queued'
           });
-        } else {
-          console.warn('[Batch Calling Controller] ⚠️  Failed to enqueue job, falling back to synchronous processing');
-          // Fall through to synchronous processing
         }
       } else {
         console.log('[Batch Calling Controller] ℹ️  Queue not available - using synchronous processing');
@@ -225,21 +267,19 @@ export class BatchCallingController {
       // Synchronous processing (fallback or when queue unavailable)
       console.log('[Batch Calling Controller] Calling Python service synchronously...');
       console.log('[Batch Calling Controller] Using ElevenLabs phone_number_id:', elevenlabsPhoneNumberId);
-      let result: Awaited<ReturnType<typeof doSubmit>>;
-      try {
-        result = await doSubmit(elevenlabsPhoneNumberId);
-      } catch (submitError: any) {
-        // If Python API returns 404 "Document not found", the phone number may be stale – try re-registering once
-        const is404NotFound =
-          submitError?.statusCode === 404 &&
-          (submitError?.message?.includes('not found') || submitError?.message?.includes('Document with id'));
-        if (!is404NotFound) throw submitError;
-
-        console.log('[Batch Calling Controller] Phone number not found in voice service (404). Attempting re-registration...');
-        const { sipTrunkService } = await import('../services/sipTrunk.service');
-        let newElevenLabsId: string;
-
+      const submitChunkWithRetry = async (chunkRecipientsPayload: any[], chunkCallName: string) => {
         try {
+          return await doSubmit(elevenlabsPhoneNumberId, chunkRecipientsPayload, chunkCallName);
+        } catch (submitError: any) {
+          const is404NotFound =
+            submitError?.statusCode === 404 &&
+            (submitError?.message?.includes('not found') || submitError?.message?.includes('Document with id'));
+          if (!is404NotFound) throw submitError;
+
+          console.log('[Batch Calling Controller] Phone number not found in voice service (404). Attempting re-registration...');
+          const { sipTrunkService } = await import('../services/sipTrunk.service');
+          let newElevenLabsId: string;
+
           if (phoneNumber.provider === 'twilio' && phoneNumber.sid && phoneNumber.token) {
             const reg = await sipTrunkService.registerTwilioPhoneNumberWithElevenLabs({
               label: phoneNumber.label,
@@ -265,14 +305,12 @@ export class BatchCallingController {
             });
             newElevenLabsId = reg.phone_number_id;
           } else {
-            return res.status(400).json({
-              success: false,
-              error: {
-                code: 'PHONE_NUMBER_NOT_REGISTERED',
-                message:
-                  'This phone number is not registered with the voice service. Please open Phone Settings (Configuration → Phone), register this number, then try the batch call again.'
-              }
-            });
+            throw {
+              statusCode: 400,
+              code: 'PHONE_NUMBER_NOT_REGISTERED',
+              message:
+                'This phone number is not registered with the voice service. Please open Phone Settings (Configuration → Phone), register this number, then try the batch call again.'
+            };
           }
 
           await PhoneNumber.updateOne(
@@ -280,86 +318,87 @@ export class BatchCallingController {
             { $set: { elevenlabs_phone_number_id: newElevenLabsId } }
           );
           console.log('[Batch Calling Controller] ✅ Re-registered phone number. New ElevenLabs ID:', newElevenLabsId);
-          result = await doSubmit(newElevenLabsId);
-        } catch (regError: any) {
-          console.error('[Batch Calling Controller] Re-registration failed:', regError.message);
-          return res.status(regError.statusCode || 500).json({
-            success: false,
-            error: {
-              code: regError.code || 'REGISTRATION_ERROR',
-              message:
-                regError.message ||
-                'Phone number not found in voice service. Please register it in Phone Settings (Configuration → Phone) and try again.'
-            }
-          });
+          return await doSubmit(newElevenLabsId, chunkRecipientsPayload, chunkCallName);
         }
+      };
+
+      const submittedChunkResults: any[] = [];
+      for (let i = 0; i < recipientChunks.length; i++) {
+        const recipientsChunk = recipientChunks[i];
+        const chunkCallName = getChunkCallName(call_name, i, totalChunks);
+        const result = await submitChunkWithRetry(recipientsChunk, chunkCallName);
+        submittedChunkResults.push({
+          result,
+          recipientsCount: recipientsChunk.length,
+          chunkCallName
+        });
       }
 
-      console.log('[Batch Calling Controller] ✅ Batch call submitted:', { id: result?.id, status: result?.status });
+      for (const chunk of submittedChunkResults) {
+        console.log('[Batch Calling Controller] ✅ Batch call submitted:', { id: chunk.result?.id, status: chunk.result?.status });
+      }
 
-      // Store batch call response in database
+      // Store batch call responses in database
       try {
         const BatchCall = (await import('../models/BatchCall')).default;
         const userId = req.user?._id;
 
         if (userId && organizationId) {
-          await BatchCall.create({
-            userId: userId instanceof mongoose.Types.ObjectId ? userId : new mongoose.Types.ObjectId(userId.toString()),
-            organizationId,
-            batch_call_id: result.id,
-            name: result.name,
-            agent_id: result.agent_id,
-            status: result.status,
-            phone_number_id: result.phone_number_id,
-            phone_provider: result.phone_provider,
-            created_at_unix: result.created_at_unix,
-            scheduled_time_unix: result.scheduled_time_unix,
-            timezone: result.timezone || 'UTC', // Default to UTC if not provided by Python API
-            total_calls_dispatched: result.total_calls_dispatched,
-            total_calls_scheduled: result.total_calls_scheduled,
-            total_calls_finished: result.total_calls_finished,
-            last_updated_at_unix: result.last_updated_at_unix,
-            retry_count: result.retry_count,
-            agent_name: result.agent_name,
-            call_name: call_name,
-            recipients_count: recipients.length,
-            conversations_synced: false // Track if conversations have been created
-          });
+          for (const chunk of submittedChunkResults) {
+            await BatchCall.create({
+              userId: userId instanceof mongoose.Types.ObjectId ? userId : new mongoose.Types.ObjectId(userId.toString()),
+              organizationId,
+              batch_call_id: chunk.result.id,
+              name: chunk.result.name,
+              agent_id: chunk.result.agent_id,
+              status: chunk.result.status,
+              phone_number_id: chunk.result.phone_number_id,
+              phone_provider: chunk.result.phone_provider,
+              created_at_unix: chunk.result.created_at_unix,
+              scheduled_time_unix: chunk.result.scheduled_time_unix,
+              timezone: chunk.result.timezone || 'UTC',
+              total_calls_dispatched: chunk.result.total_calls_dispatched,
+              total_calls_scheduled: chunk.result.total_calls_scheduled,
+              total_calls_finished: chunk.result.total_calls_finished,
+              last_updated_at_unix: chunk.result.last_updated_at_unix,
+              retry_count: chunk.result.retry_count,
+              agent_name: chunk.result.agent_name,
+              call_name: chunk.chunkCallName,
+              recipients_count: chunk.recipientsCount,
+              conversations_synced: false
+            });
 
-          console.log('[Batch Calling Controller] ✅ Batch call stored in database with ID:', result.id);
-          
-          // ============================================================
-          // ENQUEUE POLL JOB FOR AUTOMATIC BATCH COMPLETION DETECTION
-          // ============================================================
-          // This starts the background polling loop that will:
-          // 1. Poll Python API every 2s to check batch status
-          // 2. When completed, enqueue sync job to create conversations
-          // 3. Sync job triggers batch_call_completed automations
-          // No user action needed - automations fire automatically!
-          try {
-            const { enqueueBatchPoll } = await import('../queues/batchCallSync.queue');
-            const enqueued = await enqueueBatchPoll(result.id, organizationIdStr);
-            
-            if (enqueued) {
-              console.log('[Batch Calling Controller] 🚀 Background polling started for batch:', result.id);
-              console.log('[Batch Calling Controller] ⚡ Automations will trigger automatically when batch completes');
-            } else {
-              console.log('[Batch Calling Controller] ℹ️  Queue not available - batch will rely on BatchCallMonitor fallback');
+            try {
+              const { enqueueBatchPoll } = await import('../queues/batchCallSync.queue');
+              const enqueued = await enqueueBatchPoll(chunk.result.id, organizationIdStr);
+              if (enqueued) {
+                console.log('[Batch Calling Controller] 🚀 Background polling started for batch:', chunk.result.id);
+              } else {
+                console.log('[Batch Calling Controller] ℹ️  Queue not available - batch will rely on BatchCallMonitor fallback');
+              }
+            } catch (queueError: any) {
+              console.warn('[Batch Calling Controller] ⚠️  Failed to enqueue batch poll:', queueError.message);
             }
-          } catch (queueError: any) {
-            // Don't fail the request if queue enqueue fails
-            console.warn('[Batch Calling Controller] ⚠️  Failed to enqueue batch poll:', queueError.message);
-            console.warn('[Batch Calling Controller] ℹ️  Batch will rely on BatchCallMonitor fallback or user-triggered sync');
           }
         } else {
           console.warn('[Batch Calling Controller] ⚠️ Could not store batch call - userId or organizationId missing');
         }
       } catch (dbError: any) {
         console.error('[Batch Calling Controller] ⚠️ Failed to store batch call in database:', dbError.message);
-        // Don't fail the request if database storage fails - the call was already submitted
       }
 
-      res.status(201).json(result);
+      if (submittedChunkResults.length === 1) {
+        return res.status(201).json(submittedChunkResults[0].result);
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: `Batch call split into ${submittedChunkResults.length} ElevenLabs batches`,
+        total_requested_recipients: recipients.length,
+        chunk_size: this.ELEVENLABS_BATCH_SIZE,
+        total_batches_created: submittedChunkResults.length,
+        batch_ids: submittedChunkResults.map((chunk) => chunk.result.id)
+      });
     } catch (error) {
       next(error);
     }

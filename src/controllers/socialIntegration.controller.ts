@@ -3,7 +3,11 @@ import { randomUUID } from 'crypto';
 import { AuthRequest } from '../middleware/auth.middleware';
 import socialIntegrationService from '../services/socialIntegration.service';
 import { AppError } from '../middleware/error.middleware';
-import { MetaOAuthService, MetaPage } from '../services/metaOAuth.service';
+import {
+  FACEBOOK_PAGE_SUBSCRIBED_FIELDS,
+  MetaOAuthService,
+  MetaPage,
+} from '../services/metaOAuth.service';
 import { successResponse } from '../utils/response.util';
 import mongoose from 'mongoose';
 import GoogleIntegration from '../models/GoogleIntegration';
@@ -1641,7 +1645,11 @@ export class SocialIntegrationController {
         await axios.post(
           subscribeUrl,
           {
-            subscribed_fields: ['messages', 'messaging_postbacks', 'message_reads', 'message_deliveries']
+            subscribed_fields: [
+              ...FACEBOOK_PAGE_SUBSCRIBED_FIELDS,
+              'message_reads',
+              'message_deliveries',
+            ],
           },
           {
             params: {

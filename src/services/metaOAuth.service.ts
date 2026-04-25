@@ -28,6 +28,18 @@ export interface MetaInstagramAccount {
   name?: string;
 }
 
+/**
+ * Page fields for POST /{page-id}/subscribed_apps.
+ * Must include `leadgen` for Facebook Lead Ads realtime webhooks (see MetaWebhookController.handleMessenger).
+ */
+export const FACEBOOK_PAGE_SUBSCRIBED_FIELDS = [
+  'messages',
+  'messaging_postbacks',
+  'messaging_optins',
+  'messaging_referrals',
+  'leadgen',
+] as const;
+
 export class MetaOAuthService {
   private appId: string;
   private appSecret: string;
@@ -136,7 +148,8 @@ export class MetaOAuthService {
     facebook: [
       'pages_show_list', // List user's pages
       'pages_messaging', // Send and receive messages via Messenger
-      'pages_manage_metadata' // Get Page information
+      'pages_manage_metadata', // Get Page information
+      'leads_retrieval', // Read Lead Ads submissions via Graph API (/{leadgen-id})
     ],
     whatsapp: [
       'whatsapp_business_management', // WhatsApp Business API management
@@ -442,7 +455,7 @@ export class MetaOAuthService {
       const response = await axios.post(
         `${this.baseUrl}/${pageId}/subscribed_apps`,
         {
-          subscribed_fields: ['messages', 'messaging_postbacks', 'messaging_optins', 'messaging_referrals']
+          subscribed_fields: [...FACEBOOK_PAGE_SUBSCRIBED_FIELDS],
         },
         {
           params: {
