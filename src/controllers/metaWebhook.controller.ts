@@ -613,17 +613,6 @@ export class MetaWebhookController {
           const pageId = entry.id != null ? String(entry.id) : '';
           if (!pageId) continue;
           
-          // Check for Facebook Lead Ads (changes field)
-          if (entry.changes && entry.changes.length > 0) {
-            for (const change of entry.changes) {
-              if (change.field === 'leadgen' && change.value) {
-                // Facebook Lead Ad submission
-                console.log('[Messenger Webhook] Received Lead Ads submission');
-                await this.processFacebookLeadAd(pageId, change.value, entry);
-              }
-            }
-          }
-          
           // Python: for event in entry.get('messaging', []):
           for (const event of entry.messaging || []) {
             // Python: sender_id = event.get('sender', {}).get('id')

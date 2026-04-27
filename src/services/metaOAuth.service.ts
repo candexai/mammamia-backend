@@ -30,14 +30,13 @@ export interface MetaInstagramAccount {
 
 /**
  * Page fields for POST /{page-id}/subscribed_apps.
- * Must include `leadgen` for Facebook Lead Ads realtime webhooks (see MetaWebhookController.handleMessenger).
+ * Messenger-only fields (Lead Ads disabled in this project).
  */
 export const FACEBOOK_PAGE_SUBSCRIBED_FIELDS = [
   'messages',
   'messaging_postbacks',
   'messaging_optins',
   'messaging_referrals',
-  'leadgen',
 ] as const;
 
 export class MetaOAuthService {
@@ -466,47 +465,6 @@ export class MetaOAuthService {
       console.log(`[Meta OAuth] Page ${pageId} subscribed to webhooks:`, response.data);
       return response.data.success === true;
     } catch (error: any) {
-      const metaError = error.response?.data?.error;
-      const message = String(metaError?.message || error.message || '');
-      const shouldRetryWithoutLeadgen =
-        message.includes('leadgen') || message.includes('leads_retrieval');
-
-      if (shouldRetryWithoutLeadgen) {
-        try {
-          const fallbackFields = FACEBOOK_PAGE_SUBSCRIBED_FIELDS.filter(
-            (field) => field !== 'leadgen'
-          );
-
-          console.warn(
-            `[Meta OAuth] leadgen subscription rejected for page ${pageId}; retrying without leadgen fields`
-          );
-
-          const fallbackResponse = await axios.post(
-            `${this.baseUrl}/${pageId}/subscribed_apps`,
-            {
-              subscribed_fields: fallbackFields,
-            },
-            {
-              params: {
-                access_token: pageAccessToken
-              }
-            }
-          );
-
-          console.log(
-            `[Meta OAuth] Page ${pageId} subscribed to messenger-only webhooks:`,
-            fallbackResponse.data
-          );
-          return fallbackResponse.data.success === true;
-        } catch (fallbackError: any) {
-          console.error(
-            `[Meta OAuth] Fallback webhook subscription failed for page ${pageId}:`,
-            fallbackError.response?.data || fallbackError.message
-          );
-          return false;
-        }
-      }
-
       console.error(`[Meta OAuth] Error subscribing page to webhooks:`, error.response?.data || error.message);
       // Don't throw - webhook subscription might already be active
       return false;
