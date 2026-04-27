@@ -149,7 +149,6 @@ export class MetaOAuthService {
       'pages_show_list', // List user's pages
       'pages_messaging', // Send and receive messages via Messenger
       'pages_manage_metadata', // Get Page information
-      'leads_retrieval', // Read Lead Ads submissions via Graph API (/{leadgen-id})
     ],
     whatsapp: [
       'whatsapp_business_management', // WhatsApp Business API management
