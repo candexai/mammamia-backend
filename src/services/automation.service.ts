@@ -259,6 +259,19 @@ export class AutomationService {
     return await this.engine.testAutomation(automationId, testData);
   }
 
+  async testWhatsAppTemplate(data: {
+    organizationId: string;
+    userId: string;
+    to: string;
+    templateName: string;
+    languageCode: string;
+    phoneNumberId?: string;
+    components?: any[];
+    templateParams?: any[];
+  }) {
+    return await this.engine.executeWhatsAppTemplateTest(data);
+  }
+
   async triggerAutomation(automationId: string, triggerData: any, context?: any) {
     return await this.engine.executeAutomation(automationId, triggerData, context);
   }

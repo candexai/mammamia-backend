@@ -19,6 +19,7 @@ router.delete('/:automationId', controller.delete);
 router.patch('/:automationId/toggle', controller.toggle);
 router.get('/:automationId/logs', controller.getExecutionLogs);
 router.post('/:automationId/test', controller.test);
+router.post('/whatsapp/test-template', controller.testWhatsAppTemplate);
 router.post('/:automationId/trigger', controller.trigger);
 router.post('/trigger-event', controller.triggerByEvent);
 router.post('/run-batch', controller.runBatch);

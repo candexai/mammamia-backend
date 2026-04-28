@@ -4,6 +4,7 @@ import { AutomationService } from '../services/automation.service';
 import { profileService } from '../services/profile.service';
 import { agentService } from '../services/agent.service';
 import { successResponse, paginatedResponse } from '../utils/response.util';
+import { AppError } from '../middleware/error.middleware';
 
 export class AutomationController {
   private automationService: AutomationService;
@@ -138,6 +139,42 @@ export class AutomationController {
         req.body.testData
       );
       res.json(successResponse(result));
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  testWhatsAppTemplate = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const organizationId = req.user?.organizationId || req.user?._id;
+      const userId = req.user?._id?.toString();
+
+      if (!organizationId || !userId) {
+        throw new AppError(401, 'UNAUTHORIZED', 'Organization or user context not found');
+      }
+
+      const { to, templateName, languageCode, phoneNumberId, components, templateParams } = req.body || {};
+
+      if (!to || !templateName || !languageCode) {
+        throw new AppError(
+          400,
+          'MISSING_PARAMETERS',
+          'to, templateName, and languageCode are required'
+        );
+      }
+
+      const result = await this.automationService.testWhatsAppTemplate({
+        organizationId: organizationId.toString(),
+        userId,
+        to: String(to).trim(),
+        templateName: String(templateName).trim(),
+        languageCode: String(languageCode).trim(),
+        phoneNumberId: phoneNumberId ? String(phoneNumberId).trim() : undefined,
+        components: Array.isArray(components) ? components : undefined,
+        templateParams: Array.isArray(templateParams) ? templateParams : undefined
+      });
+
+      res.json(successResponse(result, 'WhatsApp template test sent via automation engine'));
     } catch (error) {
       next(error);
     }

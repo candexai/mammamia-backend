@@ -2106,6 +2106,50 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
     }
   }
 
+  async executeWhatsAppTemplateTest(params: {
+    organizationId: string;
+    userId: string;
+    to: string;
+    templateName: string;
+    languageCode: string;
+    phoneNumberId?: string;
+    components?: any[];
+    templateParams?: any[];
+  }) {
+    const handler = this.actions.get('whatsapp_template');
+    if (!handler) {
+      throw new Error('WhatsApp template action is not available');
+    }
+
+    const config: any = {
+      to: params.to,
+      templateName: params.templateName,
+      languageCode: params.languageCode
+    };
+
+    if (params.phoneNumberId) config.phoneNumberId = params.phoneNumberId;
+    if (params.components) config.components = params.components;
+    if (params.templateParams) config.templateParams = params.templateParams;
+
+    const triggerData = {
+      organizationId: params.organizationId
+    };
+
+    const context: IAutomationExecutionContext = {
+      contact: {
+        name: 'WhatsApp Test Recipient',
+        phone: params.to,
+        email: ''
+      },
+      triggerData,
+      organizationId: params.organizationId,
+      userId: params.userId,
+      now: new Date().toISOString()
+    };
+
+    return await handler.execute(config, triggerData, context);
+  }
+
   private async performUnifiedOutboundCall(params: {
     contact: any;
     agent_id: string;
