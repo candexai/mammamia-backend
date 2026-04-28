@@ -30,7 +30,7 @@ export interface MetaInstagramAccount {
 
 /**
  * Page fields for POST /{page-id}/subscribed_apps.
- * Messenger-only fields (Lead Ads disabled in this project).
+ * Messenger-only fields.
  */
 export const FACEBOOK_PAGE_SUBSCRIBED_FIELDS = [
   'messages',

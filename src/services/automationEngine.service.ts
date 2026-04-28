@@ -259,13 +259,6 @@ export class AutomationEngine {
       }
     });
 
-    // Legacy triggers (keep for backward compatibility)
-    this.triggers.set('facebook_lead', {
-      validate: async (config, data) => {
-        return data.pageId === config.pageId && data.formId === config.formId;
-      }
-    });
-
     // Facebook Messenger Message Trigger
     this.triggers.set('facebook_message', {
       validate: async (config, data) => {
