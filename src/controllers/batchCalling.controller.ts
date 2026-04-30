@@ -214,11 +214,14 @@ export class BatchCallingController {
         return batchCallingService.submitBatchCall(payload);
       };
 
-      // Check if queue is available - use it for background processing
+      // Check if queue is available.
+      // For chunked submissions, use synchronous path so all chunk records are created
+      // immediately and visible in the UI (e.g. 700 -> Batch 1/2 and Batch 2/2).
       const { enqueueBatchCall, isBatchCallQueueAvailable } = await import('../queues/batchCall.queue');
       const queueAvailable = isBatchCallQueueAvailable();
+      const shouldUseQueue = queueAvailable && !isChunkedSubmission;
 
-      if (queueAvailable) {
+      if (shouldUseQueue) {
         console.log('[Batch Calling Controller] 🚀 Queue available - enqueueing batch call job for background processing');
         console.log('[Batch Calling Controller] Recipients count:', recipients.length);
 
@@ -261,7 +264,11 @@ export class BatchCallingController {
           });
         }
       } else {
-        console.log('[Batch Calling Controller] ℹ️  Queue not available - using synchronous processing');
+        if (isChunkedSubmission && queueAvailable) {
+          console.log('[Batch Calling Controller] ℹ️  Queue is available but chunked submission detected - using synchronous processing to persist all chunks immediately');
+        } else {
+          console.log('[Batch Calling Controller] ℹ️  Queue not available - using synchronous processing');
+        }
       }
 
       // Synchronous processing (fallback or when queue unavailable)
