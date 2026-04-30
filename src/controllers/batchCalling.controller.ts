@@ -7,6 +7,15 @@ const MAX_RECIPIENTS = 10000;
 const ELEVENLABS_BATCH_SIZE = 500;
 
 export class BatchCallingController {
+  private async resolveOrganizationObjectId(req: AuthRequest): Promise<mongoose.Types.ObjectId | null> {
+    const userId = req.user?._id;
+    if (!userId) return null;
+
+    const { profileService } = await import('../services/profile.service');
+    const organizationIdStr = await profileService.ensureOrganizationForUser(userId.toString());
+    return new mongoose.Types.ObjectId(organizationIdStr);
+  }
+
   /**
    * Submit batch calling job
    * POST /api/v1/batch-calling/submit
@@ -458,7 +467,7 @@ export class BatchCallingController {
 
       // Verify the batch call belongs to the user's organization
       const BatchCall = (await import('../models/BatchCall')).default;
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
 
       if (!organizationId) {
         return res.status(401).json({
@@ -470,9 +479,7 @@ export class BatchCallingController {
 
       const batchCall = await BatchCall.findOne({
         batch_call_id: jobId,
-        organizationId: organizationId instanceof mongoose.Types.ObjectId
-          ? organizationId
-          : new mongoose.Types.ObjectId(organizationId.toString())
+        organizationId
       }).lean();
 
       if (!batchCall) {
@@ -546,7 +553,7 @@ export class BatchCallingController {
 
       // Verify the batch call belongs to the user's organization
       const BatchCall = (await import('../models/BatchCall')).default;
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
 
       if (!organizationId) {
         return res.status(401).json({
@@ -558,9 +565,7 @@ export class BatchCallingController {
 
       const batchCall = await BatchCall.findOne({
         batch_call_id: jobId,
-        organizationId: organizationId instanceof mongoose.Types.ObjectId
-          ? organizationId
-          : new mongoose.Types.ObjectId(organizationId.toString())
+        organizationId
       }).lean();
 
       if (!batchCall) {
@@ -617,7 +622,7 @@ export class BatchCallingController {
       }
 
       const BatchCall = (await import('../models/BatchCall')).default;
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
       if (!organizationId) {
         return res.status(401).json({
           success: false,
@@ -628,9 +633,7 @@ export class BatchCallingController {
 
       const batchCall = await BatchCall.findOne({
         batch_call_id: jobId,
-        organizationId: organizationId instanceof mongoose.Types.ObjectId
-          ? organizationId
-          : new mongoose.Types.ObjectId(organizationId.toString())
+        organizationId
       }).lean();
 
       if (!batchCall) {
@@ -672,7 +675,7 @@ export class BatchCallingController {
    */
   async getBatchCalls(req: AuthRequest, res: Response, next: NextFunction) {
     try {
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
       const includeCancelled = req.query.includeCancelled === 'true';
 
       if (!organizationId) {
@@ -685,9 +688,7 @@ export class BatchCallingController {
 
       const BatchCall = (await import('../models/BatchCall')).default;
       const query: any = {
-        organizationId: organizationId instanceof mongoose.Types.ObjectId
-          ? organizationId
-          : new mongoose.Types.ObjectId(organizationId.toString())
+        organizationId
       };
       if (!includeCancelled) {
         query.status = { $ne: 'cancelled' };
@@ -775,7 +776,7 @@ export class BatchCallingController {
 
       // Verify the batch call belongs to the user's organization
       const BatchCall = (await import('../models/BatchCall')).default;
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
 
       if (!organizationId) {
         return res.status(401).json({
@@ -787,9 +788,7 @@ export class BatchCallingController {
 
       const batchCall = await BatchCall.findOne({
         batch_call_id: jobId,
-        organizationId: organizationId instanceof mongoose.Types.ObjectId
-          ? organizationId
-          : new mongoose.Types.ObjectId(organizationId.toString())
+        organizationId
       }).lean();
 
       if (!batchCall) {
@@ -838,7 +837,7 @@ export class BatchCallingController {
 
       // Verify the batch call belongs to the user's organization
       const BatchCall = (await import('../models/BatchCall')).default;
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
 
       if (!organizationId) {
         return res.status(401).json({
@@ -850,9 +849,7 @@ export class BatchCallingController {
 
       const batchCall = await BatchCall.findOne({
         batch_call_id: jobId,
-        organizationId: organizationId instanceof mongoose.Types.ObjectId
-          ? organizationId
-          : new mongoose.Types.ObjectId(organizationId.toString())
+        organizationId
       }).lean();
 
       if (!batchCall) {
@@ -900,7 +897,7 @@ export class BatchCallingController {
 
       // Verify the batch call belongs to the user's organization
       const BatchCall = (await import('../models/BatchCall')).default;
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
 
       if (!organizationId) {
         return res.status(401).json({
@@ -912,9 +909,7 @@ export class BatchCallingController {
 
       const batchCall = await BatchCall.findOne({
         batch_call_id: jobId,
-        organizationId: organizationId instanceof mongoose.Types.ObjectId
-          ? organizationId
-          : new mongoose.Types.ObjectId(organizationId.toString())
+        organizationId
       }).lean();
 
       if (!batchCall) {
@@ -965,7 +960,7 @@ export class BatchCallingController {
         });
       }
 
-      const organizationId = req.user?.organizationId || req.user?._id;
+      const organizationId = await this.resolveOrganizationObjectId(req);
       if (!organizationId) {
         return res.status(401).json({
           success: false,
@@ -979,9 +974,7 @@ export class BatchCallingController {
       const Message = (await import('../models/Message')).default;
       const Customer = (await import('../models/Customer')).default;
 
-      const orgObjectId = organizationId instanceof mongoose.Types.ObjectId
-        ? organizationId
-        : new mongoose.Types.ObjectId(organizationId.toString());
+      const orgObjectId = organizationId;
 
       const batchCall = await BatchCall.findOne({
         batch_call_id: jobId,
