@@ -89,3 +89,27 @@ export const attachmentUpload = multer({
   }
 });
 
+// Multer for avatar/logo uploads (images only)
+export const avatarUpload = multer({
+  storage,
+  fileFilter: (req: any, file: any, cb: any) => {
+    const allowedImageTypes = [
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'image/gif',
+      'image/webp',
+      'image/svg+xml'
+    ];
+
+    if (allowedImageTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new AppError(400, 'INVALID_FILE_TYPE', `Unsupported image type: ${file.mimetype}`), false);
+    }
+  },
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB for avatars/logos
+  }
+});
+

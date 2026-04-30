@@ -2,8 +2,14 @@ import Settings from '../models/Settings';
 import User from '../models/User';
 import { AppError } from '../middleware/error.middleware';
 import { inboundAgentConfigService } from './inboundAgentConfig.service';
+import { gcsService } from './gcs.service';
 
 export class SettingsService {
+  private isGcsChatbotAvatarUrl(url?: string | null): boolean {
+    if (!url) return false;
+    return /https:\/\/storage\.googleapis\.com\/.+\/chatbot-avatars\//.test(url);
+  }
+
   /**
    * Get widget settings by widgetId (public access)
    * CRITICAL: widgetId IS userId (validated as ObjectId in controller)
@@ -108,6 +114,48 @@ export class SettingsService {
     }
     
     return settings;
+  }
+
+  /**
+   * Upload chatbot avatar to GCS and persist URL in settings
+   */
+  async uploadChatbotAvatar(
+    userId: string,
+    file: Express.Multer.File
+  ): Promise<{ avatarUrl: string; settings: any }> {
+    if (!file) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'No file uploaded');
+    }
+
+    let settings = await Settings.findOne({ userId });
+
+    const avatarUrl = await gcsService.uploadFile(
+      file.buffer,
+      file.originalname,
+      file.mimetype,
+      'chatbot-avatars'
+    );
+
+    // Best-effort cleanup of previous chatbot avatar if it was stored in our GCS folder
+    if (settings?.chatbotAvatar && this.isGcsChatbotAvatarUrl(settings.chatbotAvatar)) {
+      try {
+        await gcsService.deleteFile(settings.chatbotAvatar);
+      } catch (error) {
+        console.warn('[Settings Service] Failed to delete previous chatbot avatar:', error);
+      }
+    }
+
+    if (!settings) {
+      settings = await Settings.create({
+        userId,
+        chatbotAvatar: avatarUrl
+      });
+    } else {
+      settings.chatbotAvatar = avatarUrl;
+      await settings.save();
+    }
+
+    return { avatarUrl, settings };
   }
 
   /**

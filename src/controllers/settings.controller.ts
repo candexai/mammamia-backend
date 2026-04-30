@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
+import { AppError } from '../middleware/error.middleware';
 import { settingsService } from '../services/settings.service';
 import { successResponse } from '../utils/response.util';
 
@@ -49,6 +50,19 @@ export class SettingsController {
       console.log('[Settings Update] defaultKnowledgeBaseName:', settings.defaultKnowledgeBaseName);
 
       res.json(successResponse({ settings }));
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  uploadChatbotAvatar = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      if (!req.file) {
+        throw new AppError(400, 'VALIDATION_ERROR', 'No file uploaded');
+      }
+
+      const result = await settingsService.uploadChatbotAvatar(req.user!._id, req.file);
+      res.json(successResponse(result, 'Chatbot avatar uploaded successfully'));
     } catch (error) {
       next(error);
     }

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { settingsController } from '../controllers/settings.controller';
 import { authenticate } from '../middleware/auth.middleware';
+import { avatarUpload } from '../config/multer';
 
 const router = Router();
 
@@ -13,6 +14,7 @@ router.use(authenticate);
 // Settings routes
 router.get('/', settingsController.getSettings);
 router.patch('/', settingsController.updateSettings);
+router.post('/chatbot-avatar', avatarUpload.single('file'), settingsController.uploadChatbotAvatar);
 
 // E-commerce credentials
 router.post('/ecommerce-credentials', settingsController.saveEcommerceCredentials);
