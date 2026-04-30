@@ -17,7 +17,12 @@ export class BatchCallingController {
         agent_id,
         call_name,
         recipients,
-        phone_number_id
+        phone_number_id,
+        retry_count,
+        scheduled_at,
+        timezone,
+        target_concurrency_limit,
+        sender_email
       } = req.body;
 
       console.log('[Batch Calling Controller] ===== SUBMIT BATCH CALL REQUEST =====');
@@ -197,12 +202,18 @@ export class BatchCallingController {
       // Helper to submit batch call (used for initial attempt and retry after re-register)
       const doSubmit = (elevenLabsId: string, chunkRecipientsPayload: any[], chunkCallName: string) => {
         // Build payload with ONLY the required fields - no transformations, no enrichment
-        const payload = {
+        const payload: any = {
           agent_id,
           call_name: chunkCallName,
           phone_number_id: elevenLabsId,
           recipients: chunkRecipientsPayload
         };
+
+        if (retry_count !== undefined) payload.retry_count = retry_count;
+        if (scheduled_at) payload.scheduled_at = scheduled_at;
+        if (timezone) payload.timezone = timezone;
+        if (target_concurrency_limit !== undefined) payload.target_concurrency_limit = target_concurrency_limit;
+        if (sender_email) payload.sender_email = sender_email;
 
         // Log summary only (no PII – do not log full recipient list)
         console.log('[Batch Calling Controller] Submitting batch:', {
@@ -236,6 +247,11 @@ export class BatchCallingController {
             call_name: chunkCallName,
             recipients: recipientsChunk,
             phone_number_id: elevenlabsPhoneNumberId,
+            retry_count,
+            scheduled_at,
+            timezone,
+            target_concurrency_limit,
+            sender_email,
             userId,
             organizationId
           });
