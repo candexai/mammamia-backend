@@ -86,7 +86,12 @@ const setupQueueProcessor = () => {
     console.log('[Batch Call Queue] Job data:', {
       recipients_count: job.data.recipients?.length || 0,
       agent_id: job.data.agent_id,
-      call_name: job.data.call_name
+      call_name: job.data.call_name,
+      retry_count: job.data.retry_count ?? null,
+      scheduled_at: job.data.scheduled_at ?? null,
+      timezone: job.data.timezone ?? null,
+      target_concurrency_limit: job.data.target_concurrency_limit ?? null,
+      has_sender_email: Boolean(job.data.sender_email)
     });
 
     const {

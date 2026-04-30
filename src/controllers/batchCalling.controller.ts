@@ -31,7 +31,13 @@ export class BatchCallingController {
         agent_id,
         call_name,
         recipients_count: recipients?.length || 0,
-        phone_number_id
+        phone_number_id,
+        retry_count,
+        scheduled_at: scheduled_at || null,
+        timezone: timezone || null,
+        target_concurrency_limit:
+          target_concurrency_limit !== undefined ? target_concurrency_limit : null,
+        has_sender_email: Boolean(sender_email)
       });
 
       // Validate required fields
@@ -219,7 +225,12 @@ export class BatchCallingController {
         console.log('[Batch Calling Controller] Submitting batch:', {
           recipients_count: payload.recipients.length,
           agent_id: payload.agent_id,
-          phone_number_id: payload.phone_number_id
+          phone_number_id: payload.phone_number_id,
+          retry_count: payload.retry_count ?? null,
+          scheduled_at: payload.scheduled_at ?? null,
+          timezone: payload.timezone ?? null,
+          target_concurrency_limit: payload.target_concurrency_limit ?? null,
+          has_sender_email: Boolean(payload.sender_email)
         });
 
         return batchCallingService.submitBatchCall(payload);

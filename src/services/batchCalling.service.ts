@@ -82,7 +82,12 @@ export class BatchCallingService {
         agent_id: data.agent_id,
         call_name: data.call_name,
         phone_number_id: data.phone_number_id,
-        recipients_count: data.recipients.length
+        recipients_count: data.recipients.length,
+        retry_count: data.retry_count ?? null,
+        scheduled_at: data.scheduled_at ?? null,
+        timezone: data.timezone ?? null,
+        target_concurrency_limit: data.target_concurrency_limit ?? null,
+        has_sender_email: Boolean(data.sender_email)
       });
 
       // Validate phone_number_id is provided and is a non-empty string
@@ -133,7 +138,12 @@ export class BatchCallingService {
         recipients_count: payload.recipients.length,
         agent_id: payload.agent_id,
         phone_number_id: payload.phone_number_id,
-        call_name: payload.call_name
+        call_name: payload.call_name,
+        retry_count: payload.retry_count ?? null,
+        scheduled_at: payload.scheduled_at ?? null,
+        timezone: payload.timezone ?? null,
+        target_concurrency_limit: payload.target_concurrency_limit ?? null,
+        has_sender_email: Boolean(payload.sender_email)
       });
 
       // Make the request
