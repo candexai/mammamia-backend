@@ -108,6 +108,14 @@ export interface UpdateAgentPromptResponse {
 }
 
 export class AgentService {
+  private getTtsModelId(language?: string): string {
+    const normalizedLanguage = String(language || '').toLowerCase();
+    if (normalizedLanguage.startsWith('en')) {
+      return 'eleven_flash_v2';
+    }
+    return 'eleven_flash_v2';
+  }
+
   private buildSafePromptSyncBody(agent: any, toolIds: string[]): Record<string, any> {
     const dbFirst = typeof agent?.first_message === 'string' ? agent.first_message.trim() : '';
     const dbGreeting = typeof agent?.greeting_message === 'string' ? agent.greeting_message.trim() : '';
@@ -267,14 +275,15 @@ export class AgentService {
    * This is where the ACTUAL voice used in calls is stored.
    * The voice_id in agent prompt is just metadata - this one controls the TTS!
    */
-  private async updateVoiceInConversationConfig(agentId: string, voiceId: string, quiet?: boolean): Promise<void> {
+  private async updateVoiceInConversationConfig(agentId: string, voiceId: string, language?: string, quiet?: boolean): Promise<void> {
     try {
       const pythonUrl = `${PYTHON_API_BASE_URL}/api/v1/agents/${agentId}`;
+      const ttsModelId = this.getTtsModelId(language);
       const requestBody = {
         conversation_config: {
           tts: {
             voice_id: voiceId,
-            model_id: "eleven_flash_v2_5", // High-quality, low-latency multilingual model
+            model_id: ttsModelId,
             voice_settings: {
               stability: 0.5,
               similarity_boost: 0.8,
@@ -285,7 +294,7 @@ export class AgentService {
         }
       };
 
-      if (!quiet) console.log(`[Agent Service] 🎤 Updating TTS voice_id in conversation_config:`, { agent_id: agentId, voice_id: voiceId, url: pythonUrl });
+      if (!quiet) console.log(`[Agent Service] 🎤 Updating TTS voice_id in conversation_config:`, { agent_id: agentId, voice_id: voiceId, language, model_id: ttsModelId, url: pythonUrl });
 
       await axios.patch(pythonUrl, requestBody, {
         timeout: 15000,
@@ -338,7 +347,7 @@ export class AgentService {
       // CRITICAL: Update voice_id in conversation_config.tts
       if (agent.voice_id) {
         try {
-          await this.updateVoiceInConversationConfig(agentId, agent.voice_id);
+          await this.updateVoiceInConversationConfig(agentId, agent.voice_id, agent.language);
         } catch (error: any) {
           console.error('[ElevenLabs Sync] ⚠️ Failed to update voice_id (non-fatal):', error.message);
         }
@@ -381,7 +390,7 @@ export class AgentService {
       // CRITICAL: Update voice_id in conversation_config.tts
       if ((agent as any).voice_id) {
         try {
-          await this.updateVoiceInConversationConfig(agentId, (agent as any).voice_id);
+          await this.updateVoiceInConversationConfig(agentId, (agent as any).voice_id, (agent as any).language);
         } catch (error: any) {
           console.error('[Agent Service] ⚠️ Failed to update voice_id during tool sync (non-fatal):', error.message);
         }
@@ -492,7 +501,7 @@ export class AgentService {
       // This ensures the voice is actually used in calls
       if (data.voice_id) {
         try {
-          await this.updateVoiceInConversationConfig(agent.agent_id, data.voice_id);
+            await this.updateVoiceInConversationConfig(agent.agent_id, data.voice_id, data.language);
         } catch (error: any) {
           console.error('[Agent Service] ⚠️ Failed to update voice in conversation_config (non-fatal):', error.message);
           // Don't throw - agent was created successfully
@@ -680,7 +689,11 @@ export class AgentService {
       // CRITICAL: Update voice_id in conversation_config.tts
       // This is where the ACTUAL voice used in calls is stored!
       if (data.voice_id) {
-        await this.updateVoiceInConversationConfig(agentId, data.voice_id);
+        try {
+          await this.updateVoiceInConversationConfig(agentId, data.voice_id, data.language);
+        } catch (error: any) {
+          console.error('[Agent Service] ⚠️ Failed to update voice in conversation_config after prompt update (non-fatal):', error.message);
+        }
       }
 
       // Attach POST_CALL_WEBHOOK_ID to agent after successful update
@@ -775,7 +788,7 @@ export class AgentService {
         // CRITICAL: Update voice in conversation_config for the new agent
         if (data.voice_id) {
           try {
-            await this.updateVoiceInConversationConfig(newAgent.agent_id, data.voice_id);
+            await this.updateVoiceInConversationConfig(newAgent.agent_id, data.voice_id, data.language);
           } catch (error: any) {
             console.error('[Agent Service] ⚠️ Failed to update voice in conversation_config for fallback agent:', error.message);
           }
