@@ -923,6 +923,11 @@ export class AutomationEngine {
           finalDate = fromDateSerial.date;
           if (!finalTime) finalTime = fromDateSerial.time;
         }
+        const fromTimeSerial = finalTime ? toIsoPartsFromSerial(finalTime) : null;
+        if (fromTimeSerial) {
+          if (!finalDate) finalDate = fromTimeSerial.date;
+          finalTime = fromTimeSerial.time;
+        }
 
         const apptBookedRaw =
           ed.appointment_booked != null ? ed.appointment_booked : result.appointment_booked;
@@ -1647,6 +1652,11 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
           if (fromDateSerial) {
             finalDate = fromDateSerial.date;
             if (!finalTime) finalTime = fromDateSerial.time;
+          }
+          const fromTimeSerial = finalTime ? toIsoPartsFromSerial(finalTime) : null;
+          if (fromTimeSerial) {
+            if (!finalDate) finalDate = fromTimeSerial.date;
+            finalTime = fromTimeSerial.time;
           }
 
           const apptBookedRaw =
