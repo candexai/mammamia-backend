@@ -1121,10 +1121,10 @@ export class AutomationEngine {
       execute: async (config, triggerData, context: IAutomationExecutionContext) => {
         const { subject, body, to, is_html } = config;
 
-        // 1) Resolve recipient from template/config.
+        // 1) Resolve recipient from template/config (automation tab controls recipient).
         const resolvedTo = to ? await this.resolveTemplate(to, context) : context.contact.email;
 
-        // 2) Resolve connected Gmail inbox for this org/user (notification destination).
+        // 2) Resolve connected Gmail sender account for this org/user.
         let connectedGmailEmail = '';
         try {
           const googleIntegration = await GoogleIntegration.findOne({
@@ -1146,10 +1146,13 @@ export class AutomationEngine {
                 { organizationId: context.organizationId },
                 { userId: context.userId }
               ]
-            }).lean();
+            });
             const socialEmail =
               (gmailSocial as any)?.metadata?.email ||
               (gmailSocial as any)?.credentials?.email ||
+              (typeof (gmailSocial as any)?.getDecryptedApiKey === 'function'
+                ? (gmailSocial as any).getDecryptedApiKey()
+                : '') ||
               '';
             if (socialEmail) connectedGmailEmail = String(socialEmail).trim();
           }
@@ -1157,14 +1160,7 @@ export class AutomationEngine {
           console.warn('[Automation Engine] ⚠️ Failed to resolve connected Gmail email:', recipientErr.message);
         }
 
-        // 3) For inbound chatbox notifications, always route to connected Gmail inbox.
-        const isInboundChatNotification =
-          triggerData?.event === 'message_received' &&
-          ['instagram', 'facebook', 'whatsapp'].includes(String(triggerData?.platform || '').toLowerCase());
-
-        const finalRecipient = isInboundChatNotification
-          ? (connectedGmailEmail || resolvedTo)
-          : (resolvedTo || connectedGmailEmail);
+        const finalRecipient = resolvedTo || context.contact?.email || '';
 
         if (!finalRecipient || !finalRecipient.includes('@')) {
           console.warn(`[Automation Engine] ⏭️ Skipping Email: Invalid recipient address: ${finalRecipient}`);
@@ -1179,27 +1175,69 @@ export class AutomationEngine {
           `extracted.time="${(context.extracted as any)?.time || ''}"`
         );
         const emailSubject = await this.resolveTemplate(subject || 'Notification', context);
-        const emailBody = await this.resolveTemplate(body || '', context);
+        let emailBody = await this.resolveTemplate(body || '', context);
+
+        // Backward-compatible cleanup for old inbound template content.
+        const isInboundChatNotification =
+          triggerData?.event === 'message_received' &&
+          ['instagram', 'facebook', 'whatsapp'].includes(String(triggerData?.platform || '').toLowerCase());
+        const appBaseUrl = (process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+        const conversationId =
+          triggerData?.conversationId ||
+          triggerData?.conversation_id ||
+          context.conversation?.id ||
+          context.conversation?.conversation_id ||
+          '';
+        const conversationLink = conversationId ? `${appBaseUrl}/conversations/${conversationId}` : '';
+        if (conversationLink) {
+          emailBody = emailBody.replace(/https?:\/\/yourcrm\.com\/conversations\/[^\s]+/gi, conversationLink);
+        }
+        if (isInboundChatNotification && /You have received a new inbound message\./i.test(emailBody)) {
+          const senderName = (await this.resolveTemplate('{{sender_name}}', context)).trim() || 'Unknown';
+          const contactPhone = (await this.resolveTemplate('{{contact.phone}}', context)).trim() || 'Not Provided';
+          const formattedNow = (await this.resolveTemplate('{{formatted_now}}', context)).trim() || new Date().toLocaleString();
+          const platform = String(triggerData?.platform || 'chat');
+          const messageText = String(triggerData?.messageText || '').trim() || 'No message text';
+          emailBody =
+            `Hello,\n\n` +
+            `New inbound chat message received.\n\n` +
+            `- Platform: ${platform}\n` +
+            `- Sender: ${senderName}\n` +
+            `- Contact: ${contactPhone}\n` +
+            `- Message: ${messageText}\n` +
+            `- Time: ${formattedNow}\n` +
+            `- Conversation: ${conversationLink || 'Not available'}\n\n` +
+            `Please respond as soon as possible.\n\n` +
+            `Thanks,\nYour Automation System`;
+        }
+
         const bodyPreview = emailBody.length > 200 ? emailBody.slice(0, 200) + '…' : emailBody;
         console.log(`[Automation Engine] ✉️  Resolved subject: "${emailSubject}"`);
         console.log(`[Automation Engine] ✉️  Resolved body preview: ${bodyPreview}`);
 
         try {
-          const fromEmail = process.env.EMAIL_FROM || undefined;
-          const emailResult = await emailService.sendEmail({
-            to: finalRecipient,
-            subject: emailSubject,
-            ...(is_html ? { html: emailBody } : { text: emailBody }),
-            from: fromEmail
-          });
-
-          if (!emailResult.success) throw new Error(emailResult.error || 'SMTP delivery failed');
+          if (connectedGmailEmail && connectedGmailEmail.includes('@')) {
+            await gmailOAuthService.sendEmail(connectedGmailEmail, {
+              to: finalRecipient,
+              subject: emailSubject,
+              body: emailBody
+            });
+          } else {
+            const fromEmail = process.env.EMAIL_FROM || undefined;
+            const emailResult = await emailService.sendEmail({
+              to: finalRecipient,
+              subject: emailSubject,
+              ...(is_html ? { html: emailBody } : { text: emailBody }),
+              from: fromEmail
+            });
+            if (!emailResult.success) throw new Error(emailResult.error || 'SMTP delivery failed');
+          }
 
           return {
             success: true,
             status: 'completed',
             recipient: finalRecipient,
-            messageId: emailResult.messageId
+            sender: connectedGmailEmail || process.env.EMAIL_FROM || process.env.SMTP_USER || 'unknown'
           };
         } catch (error: any) {
           console.error(`[Automation Engine] ❌ Email to ${finalRecipient} failed:`, error.message);
