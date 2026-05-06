@@ -880,7 +880,7 @@ export class AutomationEngine {
           const s = String(v).trim();
           return s && s.toLowerCase() !== 'null' ? s : '';
         };
-        const finalDate =
+        let finalDate =
           cleanStr(ed.date) ||
           cleanStr(ed.preferred_date) ||
           cleanStr(ed.appointment_date) ||
@@ -889,7 +889,7 @@ export class AutomationEngine {
           cleanStr(ed.slot_date) ||
           cleanStr(ed.booking_date) ||
           cleanStr(result.date);
-        const finalTime =
+        let finalTime =
           cleanStr(ed.time) ||
           cleanStr(ed.preferred_time) ||
           cleanStr(ed.appointment_time) ||
@@ -898,6 +898,31 @@ export class AutomationEngine {
           cleanStr(ed.slot_time) ||
           cleanStr(ed.booking_time) ||
           cleanStr(result.time);
+
+        // Normalize Google/Excel serial date-time values (e.g. 46091.95833)
+        // into user-friendly date/time strings before downstream actions.
+        const serialLike = /^-?\d+(\.\d+)?$/;
+        const toIsoPartsFromSerial = (raw: string): { date: string; time: string } | null => {
+          if (!serialLike.test(raw)) return null;
+          const n = Number(raw);
+          // Reasonable spreadsheet serial range (year ~1954 to ~2064).
+          if (!Number.isFinite(n) || n < 20000 || n > 70000) return null;
+          const excelEpochUtc = Date.UTC(1899, 11, 30);
+          const ms = excelEpochUtc + n * 24 * 60 * 60 * 1000;
+          const d = new Date(ms);
+          if (isNaN(d.getTime())) return null;
+          const yyyy = d.getUTCFullYear();
+          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          const hh = String(d.getUTCHours()).padStart(2, '0');
+          const min = String(d.getUTCMinutes()).padStart(2, '0');
+          return { date: `${yyyy}-${mm}-${dd}`, time: `${hh}:${min}` };
+        };
+        const fromDateSerial = finalDate ? toIsoPartsFromSerial(finalDate) : null;
+        if (fromDateSerial) {
+          finalDate = fromDateSerial.date;
+          if (!finalTime) finalTime = fromDateSerial.time;
+        }
 
         const apptBookedRaw =
           ed.appointment_booked != null ? ed.appointment_booked : result.appointment_booked;
@@ -1581,7 +1606,7 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
             const s = String(v).trim();
             return s && s.toLowerCase() !== 'null' ? s : '';
           };
-          const finalDate =
+          let finalDate =
             cleanStr(ed.date) ||
             cleanStr(ed.preferred_date) ||
             cleanStr(ed.appointment_date) ||
@@ -1590,7 +1615,7 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
             cleanStr(ed.slot_date) ||
             cleanStr(ed.booking_date) ||
             cleanStr(result.date);
-          const finalTime =
+          let finalTime =
             cleanStr(ed.time) ||
             cleanStr(ed.preferred_time) ||
             cleanStr(ed.appointment_time) ||
@@ -1599,6 +1624,30 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
             cleanStr(ed.slot_time) ||
             cleanStr(ed.booking_time) ||
             cleanStr(result.time);
+
+          // Normalize Google/Excel serial date-time values (e.g. 46091.95833)
+          // into user-friendly date/time strings before downstream actions.
+          const serialLike = /^-?\d+(\.\d+)?$/;
+          const toIsoPartsFromSerial = (raw: string): { date: string; time: string } | null => {
+            if (!serialLike.test(raw)) return null;
+            const n = Number(raw);
+            if (!Number.isFinite(n) || n < 20000 || n > 70000) return null;
+            const excelEpochUtc = Date.UTC(1899, 11, 30);
+            const ms = excelEpochUtc + n * 24 * 60 * 60 * 1000;
+            const d = new Date(ms);
+            if (isNaN(d.getTime())) return null;
+            const yyyy = d.getUTCFullYear();
+            const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(d.getUTCDate()).padStart(2, '0');
+            const hh = String(d.getUTCHours()).padStart(2, '0');
+            const min = String(d.getUTCMinutes()).padStart(2, '0');
+            return { date: `${yyyy}-${mm}-${dd}`, time: `${hh}:${min}` };
+          };
+          const fromDateSerial = finalDate ? toIsoPartsFromSerial(finalDate) : null;
+          if (fromDateSerial) {
+            finalDate = fromDateSerial.date;
+            if (!finalTime) finalTime = fromDateSerial.time;
+          }
 
           const apptBookedRaw =
             ed.appointment_booked != null ? ed.appointment_booked : result.appointment_booked;
