@@ -32,7 +32,8 @@ export class BatchCallingController {
         scheduled_at,
         timezone,
         target_concurrency_limit,
-        sender_email
+        sender_email,
+        selected_dynamic_variable_keys
       } = req.body;
 
       console.log('[Batch Calling Controller] ===== SUBMIT BATCH CALL REQUEST =====');
@@ -292,6 +293,7 @@ export class BatchCallingController {
             timezone,
             target_concurrency_limit,
             sender_email,
+            selected_dynamic_variable_keys,
             userId,
             organizationId
           });
@@ -531,7 +533,10 @@ export class BatchCallingController {
               agent_name: chunk.result.agent_name,
               call_name: chunk.chunkCallName,
               recipients_count: chunk.recipientsCount,
-              conversations_synced: false
+              conversations_synced: false,
+              ...(Array.isArray(selected_dynamic_variable_keys) && selected_dynamic_variable_keys.length > 0 && {
+                selected_dynamic_variable_keys
+              })
             });
 
             try {

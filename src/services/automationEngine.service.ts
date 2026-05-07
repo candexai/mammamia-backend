@@ -2257,11 +2257,23 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
             const allExtraKeys = Array.from(new Set<string>(extraExtractedKeys))
               .filter((k) => k && !COVERED_EXTRACTED_KEYS.has(String(k).toLowerCase()));
 
+            // Dynamic variable keys selected by the user when uploading the CSV for a batch call.
+            // These are appended after the fixed + extracted columns and read from the per-recipient
+            // dynamic_variables that were stored at call time.
+            const selectedDynVarKeys: string[] = Array.isArray(context.triggerData?.selected_dynamic_variable_keys)
+              ? (context.triggerData.selected_dynamic_variable_keys as string[])
+                  .filter((k: string) => k && !COVERED_EXTRACTED_KEYS.has(String(k).toLowerCase()))
+              : [];
+
             rowPlan = [
               ...FIXED_COLUMNS,
               ...allExtraKeys.map((k) => ({
                 header: `Extracted ${titleCase(k)}`,
                 template: `{{extracted.${k}}}`
+              })),
+              ...selectedDynVarKeys.map((k) => ({
+                header: titleCase(k),
+                template: `{{dynamic_variables.${k}}}`
               }))
             ];
           } else {

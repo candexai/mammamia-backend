@@ -104,6 +104,7 @@ const setupQueueProcessor = () => {
       timezone,
       target_concurrency_limit,
       sender_email,
+      selected_dynamic_variable_keys,
       userId,
       organizationId
     } = job.data;
@@ -184,7 +185,10 @@ const setupQueueProcessor = () => {
         agent_name: result.agent_name,
         call_name: call_name,
         recipients_count: recipients.length,
-        conversations_synced: false
+        conversations_synced: false,
+        ...(Array.isArray(selected_dynamic_variable_keys) && selected_dynamic_variable_keys.length > 0 && {
+          selected_dynamic_variable_keys
+        })
       });
 
       console.log('[Batch Call Queue] ✅ Batch call stored in database');
@@ -265,6 +269,7 @@ export const enqueueBatchCall = async (data: {
   timezone?: string;
   target_concurrency_limit?: number;
   sender_email?: string;
+  selected_dynamic_variable_keys?: string[];
   userId: string | mongoose.Types.ObjectId;
   organizationId: string | mongoose.Types.ObjectId;
 }): Promise<Bull.Job | null> => {
@@ -284,6 +289,7 @@ export const enqueueBatchCall = async (data: {
       timezone: data.timezone,
       target_concurrency_limit: data.target_concurrency_limit,
       sender_email: data.sender_email,
+      selected_dynamic_variable_keys: data.selected_dynamic_variable_keys,
       userId: data.userId,
       organizationId: data.organizationId
     }, {

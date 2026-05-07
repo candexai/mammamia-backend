@@ -30,6 +30,7 @@ export interface IBatchCall extends Document {
   automation_triggered_phones?: string[]; // Phone numbers for which automation has been triggered (dedup source of truth)
   automation_id?: mongoose.Types.ObjectId; // Link to automation that triggered this batch
   syncErrorCount?: number; // Number of times sync has failed
+  selected_dynamic_variable_keys?: string[]; // CSV column keys chosen by user to append to Google Sheet
   createdAt: Date;
   updatedAt: Date;
 }
@@ -153,6 +154,10 @@ const BatchCallSchema = new Schema<IBatchCall>({
   syncErrorCount: {
     type: Number,
     default: 0
+  },
+  selected_dynamic_variable_keys: {
+    type: [String],
+    default: []
   }
 }, { timestamps: true });
 

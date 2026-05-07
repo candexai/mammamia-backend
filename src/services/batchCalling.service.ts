@@ -780,6 +780,7 @@ export class BatchCallingService {
               recording_url: recordingUrl,
               audio_url: recordingUrl,
               dynamic_variables: vars,
+              selected_dynamic_variable_keys: batchCall.selected_dynamic_variable_keys || [],
               appointment: {
                 booked: Boolean(appointmentDate || appointmentTime),
                 date: appointmentDate,
