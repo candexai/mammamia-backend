@@ -312,7 +312,11 @@ export class AutomationService {
         Conversation = (await import('../models/Conversation')).default;
       }
 
-      const conversation = await Conversation.findById(conversationId).lean();
+      // ElevenLabs ids (conv_…) are not Mongo ObjectIds — look up by metadata field instead.
+      const isMongo24 = /^[a-fA-F0-9]{24}$/.test(String(conversationId ?? '').trim());
+      const conversation = isMongo24
+        ? await Conversation.findById(conversationId).lean()
+        : await Conversation.findOne({ organizationId, 'metadata.conversation_id': conversationId }).lean();
 
       if (!conversation) {
         return {
@@ -348,7 +352,7 @@ export class AutomationService {
       // Fallback: build transcript from Message collection (batch sync saves messages separately)
       if (!transcriptText || transcriptText.trim().length === 0) {
         const Message = (await import('../models/Message')).default;
-        const messages = await Message.find({ conversationId })
+        const messages = await Message.find({ conversationId: conversation._id })
           .sort({ timestamp: 1 })
           .lean();
         if (messages && messages.length > 0) {
