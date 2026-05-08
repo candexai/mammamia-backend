@@ -49,6 +49,56 @@ function coerceAppointmentBooked(val: unknown): boolean | undefined {
   return undefined;
 }
 
+function formatIsoDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function addDays(d: Date, days: number): Date {
+  const copy = new Date(d);
+  copy.setDate(copy.getDate() + days);
+  return copy;
+}
+
+function nearestWeekdayIso(base: Date, targetWeekday: number): string {
+  const currentWeekday = base.getDay();
+  const delta = (targetWeekday - currentWeekday + 7) % 7; // includes today if same weekday
+  return formatIsoDate(addDays(base, delta));
+}
+
+function followingWeekdayIso(base: Date, targetWeekday: number): string {
+  const currentWeekday = base.getDay();
+  let delta = (targetWeekday - currentWeekday + 7) % 7;
+  if (delta === 0) delta = 7;
+  else delta += 7;
+  return formatIsoDate(addDays(base, delta));
+}
+
+function resolveRelativeDateFromTranscript(transcriptText: string, base: Date): string | null {
+  const text = transcriptText.toLowerCase();
+  const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const;
+
+  if (/\bday\s+after\s+tomorrow\b/.test(text)) return formatIsoDate(addDays(base, 2));
+  if (/\btomorrow\b|\bnext\s+day\b/.test(text)) return formatIsoDate(addDays(base, 1));
+  if (/\btoday\b/.test(text)) return formatIsoDate(base);
+
+  const nextWeekdayMatch = text.match(/\bnext\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (nextWeekdayMatch?.[1]) {
+    const idx = weekdays.indexOf(nextWeekdayMatch[1] as (typeof weekdays)[number]);
+    if (idx >= 0) return followingWeekdayIso(base, idx);
+  }
+
+  const nearestWeekdayMatch = text.match(/\b(?:this\s+|on\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (nearestWeekdayMatch?.[1]) {
+    const idx = weekdays.indexOf(nearestWeekdayMatch[1] as (typeof weekdays)[number]);
+    if (idx >= 0) return nearestWeekdayIso(base, idx);
+  }
+
+  return null;
+}
+
 export class AutomationService {
   private engine: AutomationEngine;
 
@@ -387,7 +437,30 @@ export class AutomationService {
       const openai = new OpenAI({ apiKey });
 
       const useDynamicExtraction = options?.extraction_prompt && options?.json_example && typeof options.json_example === 'object';
-      const currentYear = new Date().getFullYear();
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+      const todayIso = formatIsoDate(now);
+      const tomorrowIso = formatIsoDate(addDays(now, 1));
+      const dayAfterTomorrowIso = formatIsoDate(addDays(now, 2));
+      const weekdayNearestMap = [
+        `- Nearest Sunday = ${nearestWeekdayIso(now, 0)}`,
+        `- Nearest Monday = ${nearestWeekdayIso(now, 1)}`,
+        `- Nearest Tuesday = ${nearestWeekdayIso(now, 2)}`,
+        `- Nearest Wednesday = ${nearestWeekdayIso(now, 3)}`,
+        `- Nearest Thursday = ${nearestWeekdayIso(now, 4)}`,
+        `- Nearest Friday = ${nearestWeekdayIso(now, 5)}`,
+        `- Nearest Saturday = ${nearestWeekdayIso(now, 6)}`
+      ].join('\n');
+      const temporalReferenceBlock =
+        `Temporal reference (timezone: ${timeZone}):\n` +
+        `- Today = ${todayIso}\n` +
+        `- Tomorrow = ${tomorrowIso}\n` +
+        `- Day after tomorrow = ${dayAfterTomorrowIso}\n` +
+        `${weekdayNearestMap}\n` +
+        `When transcript says relative date words like "today", "tomorrow", "day after tomorrow", "next day", convert them to exact YYYY-MM-DD using this reference.\n` +
+        `When transcript says weekday words like "Monday", "on Tuesday", "this Friday", map to the NEAREST upcoming weekday from today (including today if same weekday).\n` +
+        `When transcript says "next Monday"/"next Tuesday"/etc, use the occurrence in the following week (not the nearest same-week one).`;
 
       let systemPrompt: string;
       let responseShape: string;
@@ -400,7 +473,9 @@ The user wants you to extract the following. Follow this instruction exactly:
 
 ${options.extraction_prompt}
 
-You must respond with a single JSON object that has exactly the same keys as this example. Use the types indicated (string, number, boolean). Use null for missing values. Current year for dates: ${currentYear}.
+${temporalReferenceBlock}
+
+You must respond with a single JSON object that has exactly the same keys as this example. Use the types indicated (string, number, boolean). Use null for missing values. For date-like fields, resolve relative dates from the transcript (e.g. "tomorrow at 5 pm") to exact date values instead of returning null whenever possible.
 
 Example shape (match these keys and types):
 ${exampleJson}
@@ -430,6 +505,8 @@ IMPORTANT:
 Extract for the AGREED or PRIMARY slot (use agent-stated time if that is what was confirmed):
 1. Date in YYYY-MM-DD format (convert "4 February" → "${currentYear}-02-04", use year ${currentYear} when not stated)
 2. Time in HH:MM 24-hour format (convert "6 PM" → "18:00", "3 PM" → "15:00", "4 p.m." → "16:00")
+
+${temporalReferenceBlock}
 
 Current calendar year for resolving relative dates: ${currentYear}
 
@@ -470,6 +547,10 @@ Respond ONLY with valid JSON:
         const coerced = coerceAppointmentBooked(parsed.appointment_booked);
         if (coerced !== undefined) parsed.appointment_booked = coerced;
       }
+      const resolvedRelativeDate = resolveRelativeDateFromTranscript(transcriptText, now);
+      if (resolvedRelativeDate && extractionType === 'appointment') {
+        parsed.date = resolvedRelativeDate;
+      }
 
       if (useDynamicExtraction && options.json_example) {
         const extracted_data: Record<string, any> = {};
@@ -484,6 +565,14 @@ Respond ONLY with valid JSON:
             val = Number(val);
           }
           extracted_data[key] = val;
+        }
+        if (resolvedRelativeDate) {
+          const dateLikeKeys = ['date', 'appointment_date', 'preferred_date', 'appointmentDate', 'preferredDate'];
+          for (const k of dateLikeKeys) {
+            if (k in extracted_data) {
+              extracted_data[k] = resolvedRelativeDate;
+            }
+          }
         }
         // If we have city and country, remove separate address field (city + country is our address)
         const hasCity = extracted_data.city != null && String(extracted_data.city).trim() !== '';
