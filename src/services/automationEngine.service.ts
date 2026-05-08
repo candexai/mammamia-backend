@@ -2121,11 +2121,11 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
         const FIXED_COLUMNS: { header: string; template: string }[] = [
           { header: 'Name', template: '{{name}}' },
           { header: 'Address', template: '{{address}}' },
+          { header: 'City', template: '{{city}}' },
           { header: 'Email', template: '{{email}}' },
           { header: 'Phone Number', template: '{{phone}}' },
           { header: 'Appointment Date & Time', template: '{{appointment_datetime}}' },
-          { header: 'Call Recording', template: '{{recording_link}}' },
-          { header: 'City', template: '{{city}}' }
+          { header: 'Call Recording', template: '{{recording_link}}' }
         ];
 
         // Keys already covered by FIXED_COLUMNS (so smart merge skips them).
