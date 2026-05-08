@@ -88,29 +88,30 @@ function resolveRelativeDateFromTranscript(transcriptText: string, base: Date): 
       .trim();
   const normalized = normalize(text);
 
-  if (/\bday\s+after\s+tomorrow\b/.test(normalized) || /\bdopodomani\b/.test(normalized)) return formatIsoDate(addDays(base, 2));
-  if (/\btomorrow\b|\bnext\s+day\b/.test(normalized) || /\bdomani\b/.test(normalized)) return formatIsoDate(addDays(base, 1));
-  if (/\btoday\b/.test(normalized) || /\boggi\b/.test(normalized)) return formatIsoDate(base);
+  // Italian-first for locale preference.
+  if (/\bdopodomani\b/.test(normalized) || /\bday\s+after\s+tomorrow\b/.test(normalized)) return formatIsoDate(addDays(base, 2));
+  if (/\bdomani\b/.test(normalized) || /\btomorrow\b|\bnext\s+day\b/.test(normalized)) return formatIsoDate(addDays(base, 1));
+  if (/\boggi\b/.test(normalized) || /\btoday\b/.test(normalized)) return formatIsoDate(base);
 
-  const nextWeekdayMatch = normalized.match(/\bnext\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
-  if (nextWeekdayMatch?.[1]) {
-    const idx = weekdays.indexOf(nextWeekdayMatch[1] as (typeof weekdays)[number]);
-    if (idx >= 0) return followingWeekdayIso(base, idx);
-  }
   const prossimoWeekdayMatch = normalized.match(/\bprossim[oa]\s+(domenica|lunedi|martedi|mercoledi|giovedi|venerdi|sabato)\b/);
   if (prossimoWeekdayMatch?.[1]) {
     const idx = weekdaysIt.indexOf(prossimoWeekdayMatch[1] as (typeof weekdaysIt)[number]);
     if (idx >= 0) return followingWeekdayIso(base, idx);
   }
-
-  const nearestWeekdayMatch = normalized.match(/\b(?:this\s+|on\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
-  if (nearestWeekdayMatch?.[1]) {
-    const idx = weekdays.indexOf(nearestWeekdayMatch[1] as (typeof weekdays)[number]);
-    if (idx >= 0) return nearestWeekdayIso(base, idx);
+  const nextWeekdayMatch = normalized.match(/\bnext\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (nextWeekdayMatch?.[1]) {
+    const idx = weekdays.indexOf(nextWeekdayMatch[1] as (typeof weekdays)[number]);
+    if (idx >= 0) return followingWeekdayIso(base, idx);
   }
+
   const nearestWeekdayMatchIt = normalized.match(/\b(?:quest[oa]\s+|di\s+)?(domenica|lunedi|martedi|mercoledi|giovedi|venerdi|sabato)\b/);
   if (nearestWeekdayMatchIt?.[1]) {
     const idx = weekdaysIt.indexOf(nearestWeekdayMatchIt[1] as (typeof weekdaysIt)[number]);
+    if (idx >= 0) return nearestWeekdayIso(base, idx);
+  }
+  const nearestWeekdayMatch = normalized.match(/\b(?:this\s+|on\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (nearestWeekdayMatch?.[1]) {
+    const idx = weekdays.indexOf(nearestWeekdayMatch[1] as (typeof weekdays)[number]);
     if (idx >= 0) return nearestWeekdayIso(base, idx);
   }
 
@@ -127,15 +128,17 @@ function resolveTimeFromTranscript(transcriptText: string): string | null {
       .trim();
   const normalized = normalize(text);
 
-  const numericMatches = [...normalized.matchAll(/\b(?:alle|at)?\s*(\d{1,2})([:.](\d{2}))?\s*(am|pm)?\b/g)];
+  const numericMatches = [...normalized.matchAll(/\b(?:alle|at|ore)?\s*(\d{1,2})([:.](\d{2}))?\s*(am|pm)?\b/g)];
   if (numericMatches.length > 0) {
     const last = numericMatches[numericMatches.length - 1];
     let hour = Number(last[1]);
     const minute = Number(last[3] || '00');
     const meridiem = (last[4] || '').toLowerCase();
+    const hasItalianPmContext = /\b(pomeriggio|sera|stasera)\b/.test(normalized);
     if (Number.isFinite(hour) && Number.isFinite(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
       if (meridiem === 'pm' && hour < 12) hour += 12;
       if (meridiem === 'am' && hour === 12) hour = 0;
+      if (!meridiem && hasItalianPmContext && hour >= 1 && hour <= 11) hour += 12;
       return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
     }
   }
@@ -509,11 +512,13 @@ export class AutomationService {
       ].join('\n');
       const temporalReferenceBlock =
         `Temporal reference (timezone: ${timeZone}):\n` +
+        `- Preferred locale = Italian (it-IT). Interpret Italian date/time phrases first.\n` +
         `- Today = ${todayIso}\n` +
         `- Tomorrow = ${tomorrowIso}\n` +
         `- Day after tomorrow = ${dayAfterTomorrowIso}\n` +
         `${weekdayNearestMap}\n` +
         `When transcript says relative date words like "today", "tomorrow", "day after tomorrow", "next day", convert them to exact YYYY-MM-DD using this reference.\n` +
+        `Italian phrases like "oggi", "domani", "dopodomani", "lunedì/martedì...", "prossimo lunedì", "alle undici", "alle 15" must be resolved using Italian interpretation first.\n` +
         `When transcript says weekday words like "Monday", "on Tuesday", "this Friday", map to the NEAREST upcoming weekday from today (including today if same weekday).\n` +
         `When transcript says "next Monday"/"next Tuesday"/etc, use the occurrence in the following week (not the nearest same-week one).`;
 
