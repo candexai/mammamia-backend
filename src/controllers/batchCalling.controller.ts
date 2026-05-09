@@ -844,23 +844,52 @@ export class BatchCallingController {
         current_status: batchCall.status
       });
 
-      const result = await batchCallingService.retryBatchJob(jobId);
-
-      console.log('[Batch Calling Controller] ✅ Retry API call successful:', {
-        job_id: jobId,
-        new_status: result.status,
-        total_calls_scheduled: result.total_calls_scheduled,
-        total_calls_finished: result.total_calls_finished
-      });
-
+      // Update status to "retrying" immediately so UI shows the change
       try {
         await BatchCall.updateOne(
           { batch_call_id: jobId },
-          { $set: { status: result.status || 'in_progress', last_updated_at_unix: Math.floor(Date.now() / 1000) } }
+          { $set: { status: 'retrying', last_updated_at_unix: Math.floor(Date.now() / 1000) } }
         );
-        console.log('[Batch Calling Controller] ✅ Database status updated to:', result.status || 'in_progress');
+        console.log('[Batch Calling Controller] ✅ Database status updated to: retrying (immediate)');
       } catch (dbError: any) {
-        console.warn('[Batch Calling Controller] ⚠️ Failed to update retried batch status in database:', dbError.message);
+        console.warn('[Batch Calling Controller] ⚠️ Failed to update retrying status in database:', dbError.message);
+      }
+
+      let result;
+      try {
+        result = await batchCallingService.retryBatchJob(jobId);
+
+        console.log('[Batch Calling Controller] ✅ Retry API call successful:', {
+          job_id: jobId,
+          new_status: result.status,
+          total_calls_scheduled: result.total_calls_scheduled,
+          total_calls_finished: result.total_calls_finished
+        });
+
+        // Update status to the actual status returned from Python API
+        try {
+          const newStatus = result.status || 'in_progress';
+          await BatchCall.updateOne(
+            { batch_call_id: jobId },
+            { $set: { status: newStatus, last_updated_at_unix: Math.floor(Date.now() / 1000) } }
+          );
+          console.log('[Batch Calling Controller] ✅ Database status updated to:', newStatus);
+        } catch (dbError: any) {
+          console.warn('[Batch Calling Controller] ⚠️ Failed to update retried batch status in database:', dbError.message);
+        }
+      } catch (retryError: any) {
+        console.error('[Batch Calling Controller] ❌ Retry API call failed:', retryError);
+        // Revert status to previous status if retry fails
+        try {
+          await BatchCall.updateOne(
+            { batch_call_id: jobId },
+            { $set: { status: batchCall.status, last_updated_at_unix: Math.floor(Date.now() / 1000) } }
+          );
+          console.log('[Batch Calling Controller] ✅ Database status reverted to:', batchCall.status);
+        } catch (revertError: any) {
+          console.warn('[Batch Calling Controller] ⚠️ Failed to revert batch status in database:', revertError.message);
+        }
+        throw retryError;
       }
 
       res.status(200).json(result);
