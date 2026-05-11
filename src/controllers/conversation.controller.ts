@@ -60,13 +60,14 @@ export class ConversationController {
         }).lean() as any[];
 
         if (pendingBatches.length > 0) {
-          console.log(`[Conversation Controller] 🔄 Syncing ${pendingBatches.length} batch call(s) before responding`);
+          console.log(
+            `[Conversation Controller] 🔄 Scheduling ${pendingBatches.length} batch call sync(s) in background (list response not blocked)`
+          );
 
           const syncTasks = pendingBatches.map(async (batch) => {
             try {
               const status = await batchCallingService.getBatchJobStatus(batch.batch_call_id);
 
-              // Update DB with latest status
               await BatchCall.updateOne(
                 { batch_call_id: batch.batch_call_id },
                 {
@@ -80,16 +81,15 @@ export class ConversationController {
                 }
               );
 
-              // Only sync (and trigger automations) once the ENTIRE batch is completed.
-              // Partial syncs on in_progress batches caused automations to fire prematurely
-              // before all calls had finished.
               if (status.status === 'completed') {
                 await batchCallingService.syncBatchCallConversations(
                   batch.batch_call_id,
                   organizationId.toString()
                 );
               } else {
-                console.log(`[Conversation Controller] ⏳ Batch ${batch.batch_call_id} still in progress (status: ${status.status}, finished: ${status.total_calls_finished}/${status.total_calls_scheduled}) – skipping sync until completed`);
+                console.log(
+                  `[Conversation Controller] ⏳ Batch ${batch.batch_call_id} still in progress (status: ${status.status}, finished: ${status.total_calls_finished}/${status.total_calls_scheduled}) – skipping sync until completed`
+                );
               }
             } catch (err: any) {
               console.error(
@@ -99,11 +99,9 @@ export class ConversationController {
             }
           });
 
-          // Wait up to 8 seconds for syncs to complete; return what we have if it takes longer
-          await Promise.race([
-            Promise.allSettled(syncTasks),
-            new Promise<void>(resolve => setTimeout(resolve, 20000))
-          ]);
+          void Promise.allSettled(syncTasks).catch((err) =>
+            console.error('[Conversation Controller] Batch sync background error:', err)
+          );
         }
       } catch (syncError: any) {
         console.error('[Conversation Controller] ⚠️ Batch sync error (non-blocking):', syncError.message);

@@ -9,6 +9,13 @@ export interface AuthRequest extends Request {
   files?: Express.Multer.File[] | { [fieldname: string]: Express.Multer.File[] };
 }
 
+/** Avoids running heavy usage aggregation on every API call (especially with 15s FE polling). */
+const orgLockCache = new Map<
+  string,
+  { at: number; locked: boolean; reason: string | null }
+>();
+const ORG_LOCK_CACHE_TTL_MS = 30_000;
+
 export const authenticate = async (
   req: AuthRequest,
   res: Response,
@@ -49,15 +56,36 @@ export const authenticate = async (
         path.includes('/webhooks'); // Allow webhooks to process or self-terminate correctly
 
       if (!isExemptPath) {
-        const { usageTrackerService } = await import('../services/usage/usageTracker.service');
-        const lockStatus = await usageTrackerService.isOrganizationLocked(user.organizationId.toString());
-        
-        if (lockStatus.locked) {
-          throw new AppError(
-            403,
-            'PLAN_LIMIT_EXCEEDED',
-            lockStatus.reason || 'Your organization is locked because you have exceeded your plan limits. Please upgrade to continue using our services.'
-          );
+        const orgKey = user.organizationId.toString();
+        const now = Date.now();
+        const cached = orgLockCache.get(orgKey);
+
+        if (cached && now - cached.at < ORG_LOCK_CACHE_TTL_MS) {
+          if (cached.locked) {
+            throw new AppError(
+              403,
+              'PLAN_LIMIT_EXCEEDED',
+              cached.reason ||
+                'Your organization is locked because you have exceeded your plan limits. Please upgrade to continue using our services.'
+            );
+          }
+        } else {
+          const { usageTrackerService } = await import('../services/usage/usageTracker.service');
+          const lockStatus = await usageTrackerService.isOrganizationLocked(orgKey);
+          orgLockCache.set(orgKey, {
+            at: now,
+            locked: lockStatus.locked,
+            reason: lockStatus.reason
+          });
+
+          if (lockStatus.locked) {
+            throw new AppError(
+              403,
+              'PLAN_LIMIT_EXCEEDED',
+              lockStatus.reason ||
+                'Your organization is locked because you have exceeded your plan limits. Please upgrade to continue using our services.'
+            );
+          }
         }
       }
     }

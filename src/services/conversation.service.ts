@@ -111,37 +111,58 @@ export class ConversationService {
       .limit(limit)
       .lean();
 
-    // Get last message for each conversation
-    const conversationsWithLastMessage = await Promise.all(
-      conversations.map(async (conv: any) => {
-        const lastMessage = await Message.findOne({
-          conversationId: conv._id,
-          type: 'message'
-        })
-          .sort({ timestamp: -1 })
-          .lean();
+    const convIds = conversations.map((c: any) => c._id).filter(Boolean);
+    const lastByConvId = new Map<string, { id: unknown; text: string; sender: string; timestamp: Date }>();
 
-        // Ensure customer has a name - use email or phone as fallback
-        if (conv.customerId) {
-          if (!conv.customerId.name || conv.customerId.name === '') {
-            conv.customerId.name = conv.customerId.email || conv.customerId.phone || 'Unknown Customer';
+    if (convIds.length > 0) {
+      const lastRows = await Message.aggregate([
+        { $match: { conversationId: { $in: convIds }, type: 'message' } },
+        { $sort: { timestamp: -1 } },
+        {
+          $group: {
+            _id: '$conversationId',
+            id: { $first: '$_id' },
+            text: { $first: '$text' },
+            sender: { $first: '$sender' },
+            timestamp: { $first: '$timestamp' }
           }
         }
+      ]);
 
-        return {
-          ...conv,
-          // CRITICAL: Include transcript and metadata for phone calls
-          transcript: conv.transcript || null,
-          metadata: conv.metadata || {},
-          lastMessage: lastMessage ? {
-            id: lastMessage._id,
-            text: lastMessage.text,
-            sender: lastMessage.sender,
-            timestamp: lastMessage.timestamp
-          } : null
-        };
-      })
-    );
+      for (const row of lastRows) {
+        lastByConvId.set(String(row._id), {
+          id: row.id,
+          text: row.text ?? '',
+          sender: row.sender ?? 'customer',
+          timestamp: row.timestamp
+        });
+      }
+    }
+
+    const conversationsWithLastMessage = conversations.map((conv: any) => {
+      const lastMessage = lastByConvId.get(String(conv._id)) ?? null;
+
+      if (conv.customerId) {
+        if (!conv.customerId.name || conv.customerId.name === '') {
+          conv.customerId.name =
+            conv.customerId.email || conv.customerId.phone || 'Unknown Customer';
+        }
+      }
+
+      return {
+        ...conv,
+        transcript: conv.transcript || null,
+        metadata: conv.metadata || {},
+        lastMessage: lastMessage
+          ? {
+              id: lastMessage.id,
+              text: lastMessage.text,
+              sender: lastMessage.sender,
+              timestamp: lastMessage.timestamp
+            }
+          : null
+      };
+    });
 
     return {
       items: conversationsWithLastMessage,
