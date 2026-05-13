@@ -17,6 +17,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const organizationId = (req.user as any)?.organizationId;
 
     if (!organizationId) {
+      // Plan and usage are org-scoped; JWT carries userId only — org comes from the User document (see authenticate middleware).
       res.status(200).json({
         success: true,
         data: { warnings: [], lockStatus: { locked: false, reason: null } }

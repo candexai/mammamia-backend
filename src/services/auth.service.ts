@@ -39,6 +39,10 @@ import CSVImport from '../models/CSVImport';
 import InboundNumber from '../models/InboundNumber';
 import { getPlanLimits } from '../config/planLimits';
 import { verifyCaptchaToken } from '../utils/captcha.util';
+import { logger } from '../utils/logger.util';
+
+/** Mongoose user document shape used when building API profile payloads */
+type UserDoc = IUser & { _id: mongoose.Types.ObjectId; save(): Promise<unknown> };
 
 export class AuthService {
   // In-memory store as fallback when Redis is not available
@@ -143,21 +147,13 @@ export class AuthService {
 
     console.log('7 - signup success');
 
+    const profile = await this.buildUserProfileResponse(user as UserDoc);
+
     return {
       token: accessToken,
       refreshToken,
       expiresIn: 3600, // 1 hour in seconds
-      user: {
-        id: user._id,
-        email: user.email,
-        name: `${user.firstName} ${user.lastName}`,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        avatar: user.avatar,
-        role: user.role,
-        isAdmin: user.role === 'admin',
-        organizationId: user.organizationId
-      }
+      user: profile
     };
   }
 
@@ -210,21 +206,13 @@ export class AuthService {
 
     console.log('7 - login success');
 
+    const profile = await this.buildUserProfileResponse(user as UserDoc);
+
     return {
       token: accessToken,
       refreshToken,
       expiresIn: 3600, // 1 hour in seconds
-      user: {
-        id: user._id,
-        email: user.email,
-        name: `${user.firstName} ${user.lastName}`,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        avatar: user.avatar,
-        role: user.role,
-        isAdmin: user.role === 'admin',
-        organizationId: user.organizationId
-      }
+      user: profile
     };
   }
 
@@ -240,24 +228,17 @@ export class AuthService {
     user.lastActiveAt = new Date();
     await user.save();
 
+    const fresh = await User.findById(userId).select('-passwordHash');
+    if (!fresh) {
+      throw new AppError(404, 'NOT_FOUND', 'User not found');
+    }
+    const profile = await this.buildUserProfileResponse(fresh as UserDoc);
+
     return {
       token: accessToken,
       refreshToken,
       expiresIn: 3600,
-      user: {
-        id: userId,
-        email: user.email,
-        name: `${user.firstName} ${user.lastName}`,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        avatar: user.avatar,
-        role: user.role,
-        isAdmin: user.role === 'admin',
-        organizationId: user.organizationId ? String(user.organizationId) : '',
-        provider: user.provider,
-        status: user.status || 'active',
-        createdAt: user.createdAt ? new Date(user.createdAt).toISOString() : new Date().toISOString()
-      }
+      user: profile
     };
   }
 
@@ -311,14 +292,10 @@ export class AuthService {
     return { message: 'Logged out successfully' };
   }
 
-  // Get current user
-  async getCurrentUser(userId: string) {
-    const user = await User.findById(userId).select('-passwordHash');
-
-    if (!user) {
-      throw new AppError(404, 'NOT_FOUND', 'User not found');
-    }
-
+  /**
+   * Shared profile payload for /auth/me, login, signup, and OAuth — keeps onboarding and subscription in sync.
+   */
+  private async buildUserProfileResponse(user: UserDoc) {
     // Initialize subscription ONLY if subscription or plan is truly missing
     // NEVER overwrite an existing subscription.plan
     // NEVER reset activatedAt if it exists
@@ -360,8 +337,12 @@ export class AuthService {
       }
     }
 
-    const responseData = {
-      id: user._id,
+    const createdAtIso = user.createdAt
+      ? new Date(user.createdAt as unknown as Date).toISOString()
+      : new Date().toISOString();
+
+    const responseData: Record<string, unknown> = {
+      id: String(user._id),
       email: user.email,
       name: `${user.firstName} ${user.lastName}`,
       firstName: user.firstName,
@@ -369,9 +350,11 @@ export class AuthService {
       avatar: user.avatar,
       role: user.role,
       isAdmin: user.role === 'admin',
-      organizationId: user.organizationId,
+      organizationId: user.organizationId ? String(user.organizationId) : '',
       permissions: user.permissions,
-      createdAt: user.createdAt,
+      createdAt: createdAtIso,
+      status: user.status || 'active',
+      provider: user.provider,
       // Onboarding fields
       phone: user.phone,
       companyName: user.companyName,
@@ -419,6 +402,30 @@ export class AuthService {
     }
 
     return responseData;
+  }
+
+  // Get current user
+  async getCurrentUser(userId: string) {
+    const t0 = Date.now();
+    const user = await User.findById(userId).select('-passwordHash');
+    const tFind = Date.now();
+
+    if (!user) {
+      throw new AppError(404, 'NOT_FOUND', 'User not found');
+    }
+
+    const profile = await this.buildUserProfileResponse(user as UserDoc);
+    const tDone = Date.now();
+
+    logger.info('[Auth] /auth/me profile built', {
+      findByIdMs: tFind - t0,
+      buildProfileMs: tDone - tFind,
+      totalMs: tDone - t0,
+      userId,
+      hasOrg: Boolean(user.organizationId)
+    });
+
+    return profile;
   }
 
   // Complete onboarding

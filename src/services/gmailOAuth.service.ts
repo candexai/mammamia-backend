@@ -32,10 +32,16 @@ export class GmailOAuthService {
         throw new Error('User ID and Organization ID are required for Gmail OAuth');
       }
       
-      // Build callback URL for our backend - use ngrok URL as specified
-      // Include organizationId and userId as query params so we can save the integration
-      const ngrokBackendUrl = 'https://aisteinai-backend-2026.onrender.com';
-      const callbackUrl = `${ngrokBackendUrl}/api/v1/social-integrations/gmail/oauth/callback?organizationId=${organizationId}&userId=${userId}`;
+      // Public origin of this Node API (same as recording links in Sheets). Never hardcode deploy URLs.
+      const publicBackendBase = (process.env.BACKEND_URL || process.env.PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
+      if (!publicBackendBase) {
+        throw new AppError(
+          500,
+          'CONFIG_ERROR',
+          'Set BACKEND_URL or PUBLIC_API_URL to your public API origin (e.g. https://api.candexai.co.in) so Gmail OAuth can redirect to this backend.'
+        );
+      }
+      const callbackUrl = `${publicBackendBase}/api/v1/social-integrations/gmail/oauth/callback?organizationId=${organizationId}&userId=${userId}`;
       
       // Python API flow:
       // 1. User → Python API /email/authorize?redirect_url=OUR_CALLBACK

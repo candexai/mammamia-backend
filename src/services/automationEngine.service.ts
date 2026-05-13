@@ -2093,21 +2093,43 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
         const { spreadsheetId } = config;
         const userValues: any[] = Array.isArray((config as any).values) ? (config as any).values : [];
         const isBatchCompletedEvent = String(context?.triggerData?.event || '').trim() === 'batch_call_completed';
+        const mongoConversationId = String(context?.triggerData?.conversation_id || '').trim();
         const externalConversationId = String(
           context?.conversation?.conversation_id ||
           context?.triggerData?.conversation_id ||
           ''
         ).trim();
-        const transcriptReady = Boolean(context?.conversation?.transcript || context?.conversation?.transcript_text);
+        const transcriptFromDoc = context?.conversation?.transcript;
+        const hasStructuredTranscript =
+          transcriptFromDoc &&
+          (typeof transcriptFromDoc === 'string'
+            ? transcriptFromDoc.trim().length > 0
+            : Boolean(
+                (transcriptFromDoc as any)?.items?.length ||
+                  (transcriptFromDoc as any)?.messages?.length ||
+                  (Array.isArray(transcriptFromDoc) && transcriptFromDoc.length > 0)
+              ));
+        const transcriptReady = Boolean(
+          hasStructuredTranscript ||
+            (context?.conversation?.transcript_text && String(context.conversation.transcript_text).trim())
+        );
 
-        // Hard gate for batch flow: do not write partially-ready rows.
-        // Recording link can arrive later on some providers, so we don't block on it.
-        if (isBatchCompletedEvent && (!externalConversationId || !transcriptReady)) {
-          console.log('[Automation Engine] ⏭️ Skipping Google Sheets append: batch conversation not fully ready yet', {
-            hasConversationId: Boolean(externalConversationId),
-            transcriptReady
-          });
-          return { success: true, status: 'skipped', reason: 'Batch conversation not fully ready' };
+        // Batch: batchCalling.service only fires after the provider transcript is ready.
+        // Require internal conversation id + loaded context; do not skip only because
+        // transcript_text (from Message rows) is empty — that caused false "not fully ready" skips.
+        if (isBatchCompletedEvent) {
+          if (!mongoConversationId) {
+            console.log('[Automation Engine] ⏭️ Skipping Google Sheets append: batch_call_completed missing conversation_id', {
+              transcriptReady
+            });
+            return { success: true, status: 'skipped', reason: 'Batch conversation id missing' };
+          }
+          if (!context?.conversation) {
+            console.log('[Automation Engine] ⏭️ Skipping Google Sheets append: conversation context not loaded', {
+              mongoConversationId
+            });
+            return { success: true, status: 'skipped', reason: 'Conversation context missing' };
+          }
         }
 
         // Default to fixed format unless explicitly disabled (useFixedFormat=false).
@@ -2675,8 +2697,43 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
         }
       }
 
-      const contactIds = Array.isArray(triggerData.contactIds) ? triggerData.contactIds : [triggerData.contactId].filter(Boolean);
+      const contactIdsRaw = Array.isArray(triggerData.contactIds)
+        ? triggerData.contactIds
+        : [triggerData.contactId].filter(Boolean);
+      let contactIds: string[] = contactIdsRaw.map((id: any) => String(id)).filter(Boolean);
+
+      // batch_call_completed: recover contactId if payload omitted it but conversation/customer exists.
+      if (contactIds.length === 0 && triggerData.event === 'batch_call_completed' && organizationId) {
+        if (triggerData.conversation_id) {
+          const conv = await Conversation.findById(triggerData.conversation_id).select('customerId').lean();
+          if (conv?.customerId) {
+            contactIds = [String(conv.customerId)];
+            console.log('[Automation Engine] ℹ️ batch_call_completed: recovered contactId from conversation');
+          }
+        }
+        if (contactIds.length === 0 && triggerData.freshContactData?.phone) {
+          const oid = mongoose.Types.ObjectId.isValid(String(organizationId))
+            ? new mongoose.Types.ObjectId(String(organizationId))
+            : organizationId;
+          const found = await Customer.findOne({
+            organizationId: oid,
+            phone: triggerData.freshContactData.phone
+          })
+            .select('_id')
+            .lean();
+          if (found?._id) {
+            contactIds = [String(found._id)];
+            console.log('[Automation Engine] ℹ️ batch_call_completed: recovered contactId via phone + organizationId');
+          }
+        }
+      }
+
       console.log(`[Automation Engine] 👥 Processing ${contactIds.length} contact(s)`);
+      if (contactIds.length === 0) {
+        console.warn(
+          '[Automation Engine] ⚠️ batch_call_completed: no contactId and could not recover — no action nodes will run. Check conversation.customerId and freshContactData.phone.'
+        );
+      }
       const missingContacts: string[] = [];
 
       for (const contactId of contactIds) {

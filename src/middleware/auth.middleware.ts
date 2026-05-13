@@ -41,6 +41,7 @@ export const authenticate = async (
     const jwtSecret = process.env.JWT_SECRET || 'your_super_secret_jwt_key_change_in_production';
     const decoded: any = jwt.verify(token, jwtSecret);
 
+    // JWT carries userId only; organizationId, role, and plan context always come from the User document.
     const user = await User.findById(decoded.userId).select('-passwordHash');
 
     if (!user || user.status !== 'active') {
