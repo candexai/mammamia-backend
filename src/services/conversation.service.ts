@@ -67,23 +67,37 @@ export class ConversationService {
       const customers = await Customer.find(customerQuery).select('_id').lean();
       const customerIds = customers.map((c) => c._id);
 
-      // Match by message text - scoped to this org's conversations only to avoid cross-tenant scans.
-      // Step 1: get conversation IDs for this org (IDs only, cheap with the org index).
-      const orgConvDocs = await Conversation.find({ organizationId: filters.organizationId })
-        .select('_id')
-        .lean();
-      const orgConvIds = orgConvDocs.map((c) => c._id);
-
-      // Step 2: search messages only within those conversation IDs.
+      // Match by message text. Prefer denormalized organizationId on Message so we never
+      // materialize the full org conversation-id list (that scaled with org size, not page size).
+      const orgOidForMessages = new mongoose.Types.ObjectId(String(filters.organizationId));
       let conversationIdsFromMessages: mongoose.Types.ObjectId[] = [];
-      if (orgConvIds.length > 0) {
+
+      const hasOrgScopedMessages = await Message.exists({
+        organizationId: orgOidForMessages,
+        type: 'message'
+      });
+
+      if (hasOrgScopedMessages) {
         const matchingIds = await Message.find({
-          conversationId: { $in: orgConvIds },
+          organizationId: orgOidForMessages,
           type: 'message',
           text: safeRegex
         }).distinct('conversationId');
-
         conversationIdsFromMessages = matchingIds as mongoose.Types.ObjectId[];
+      } else {
+        // Legacy fallback before message.organizationId backfill
+        const orgConvDocs = await Conversation.find({ organizationId: filters.organizationId })
+          .select('_id')
+          .lean();
+        const orgConvIds = orgConvDocs.map((c) => c._id);
+        if (orgConvIds.length > 0) {
+          const matchingIds = await Message.find({
+            conversationId: { $in: orgConvIds },
+            type: 'message',
+            text: safeRegex
+          }).distinct('conversationId');
+          conversationIdsFromMessages = matchingIds as mongoose.Types.ObjectId[];
+        }
       }
 
       const orBranches: any[] = [];
