@@ -20,6 +20,9 @@ const orgLockCache = new Map<
 >();
 const ORG_LOCK_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** One async usage+lock warm per org when usage cache is cold (avoids stampedes). */
+const orgUsageLockWarmInFlight = new Set<string>();
+
 export function clearOrgLockCache(organizationId: string): void {
   orgLockCache.delete(organizationId);
 }
@@ -80,20 +83,44 @@ export const authenticate = async (
           }
         } else {
           const { usageTrackerService } = await import('../services/usage/usageTracker.service');
-          const lockStatus = await usageTrackerService.isOrganizationLocked(orgKey);
-          orgLockCache.set(orgKey, {
-            at: now,
-            locked: lockStatus.locked,
-            reason: lockStatus.reason
-          });
+          const peeked = await usageTrackerService.peekUsageFromCache(orgKey);
 
-          if (lockStatus.locked) {
-            throw new AppError(
-              403,
-              'PLAN_LIMIT_EXCEEDED',
-              lockStatus.reason ||
-                'Your organization is locked because you have exceeded your plan limits. Please upgrade to continue using our services.'
-            );
+          if (peeked) {
+            const lockStatus = await usageTrackerService.isOrganizationLocked(orgKey, peeked);
+            orgLockCache.set(orgKey, {
+              at: now,
+              locked: lockStatus.locked,
+              reason: lockStatus.reason
+            });
+            if (lockStatus.locked) {
+              throw new AppError(
+                403,
+                'PLAN_LIMIT_EXCEEDED',
+                lockStatus.reason ||
+                  'Your organization is locked because you have exceeded your plan limits. Please upgrade to continue using our services.'
+              );
+            }
+          } else {
+            if (!orgUsageLockWarmInFlight.has(orgKey)) {
+              orgUsageLockWarmInFlight.add(orgKey);
+              void usageTrackerService
+                .getOrganizationUsage(orgKey, true, { profileOnly: true })
+                .then((usage) => usageTrackerService.isOrganizationLocked(orgKey, usage))
+                .then((lock) => {
+                  orgLockCache.set(orgKey, {
+                    at: Date.now(),
+                    locked: lock.locked,
+                    reason: lock.reason
+                  });
+                })
+                .catch(() => {
+                  /* non-fatal; next request will retry warm */
+                })
+                .finally(() => {
+                  orgUsageLockWarmInFlight.delete(orgKey);
+                });
+            }
+            // Do not block the request on cold usage cache — lock is enforced once async warm completes.
           }
         }
       }

@@ -320,7 +320,15 @@ export class AuthService {
     if (user.organizationId) {
       try {
         const { usageTrackerService } = await import('./usage/usageTracker.service');
-        const aggUsage = await usageTrackerService.getOrganizationUsage(user.organizationId.toString());
+        const aggUsage = await usageTrackerService.getOrganizationUsage(user.organizationId.toString(), true, {
+          profileOnly: true,
+          authInstant: true,
+          authFallback: {
+            chatMessages: user.subscription?.usage?.conversations || 0,
+            callMinutes: user.subscription?.usage?.minutes || 0,
+            automations: user.subscription?.usage?.automations || 0
+          }
+        });
         freshUsage = {
           conversations: aggUsage.chatMessages, // In FE, chatMessages is shown as conversations
           minutes: aggUsage.callMinutes,

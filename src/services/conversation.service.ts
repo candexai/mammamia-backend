@@ -102,17 +102,19 @@ export class ConversationService {
     }
 
     const skip = (page - 1) * limit;
-    const total = await Conversation.countDocuments(query);
 
-    // Exclude the transcript field — it can be MBs per row and is never needed for the list view.
-    const conversations = await Conversation.find(query)
-      .select('-transcript')
-      .populate('customerId', 'name email phone avatar color')
-      .populate('assignedOperatorId', 'firstName lastName avatar')
-      .sort({ updatedAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    // Count + page fetch in parallel — first paint only needs this page (default 25 rows).
+    const [total, conversations] = await Promise.all([
+      Conversation.countDocuments(query),
+      Conversation.find(query)
+        .select('-transcript')
+        .populate('customerId', 'name email phone avatar color')
+        .populate('assignedOperatorId', 'firstName lastName avatar')
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
     const convIds = conversations.map((c: any) => c._id).filter(Boolean);
     const lastByConvId = new Map<string, { id: unknown; text: string; sender: string; timestamp: Date }>();

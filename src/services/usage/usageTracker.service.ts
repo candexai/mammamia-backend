@@ -20,6 +20,9 @@ import { getEffectiveFeatureLimits } from '../../config/planLimits';
 const localUsageCache = new Map<string, { value: any; expiresAt: number }>();
 const LOCAL_USAGE_TTL_MS = 60_000;
 
+/** One in-flight profile usage recompute per org (authInstant background warm). */
+const profileUsageWarmInFlight = new Set<string>();
+
 function localCacheGet(key: string): any | null {
   const entry = localUsageCache.get(key);
   if (entry && entry.expiresAt > Date.now()) return entry.value;
@@ -226,6 +229,39 @@ export class UsageTrackerService {
   }
 
   /**
+   * Read precomputed usage from Redis/local cache only (no DB aggregation).
+   * Used by auth middleware for plan-lock checks so API requests are not blocked on cold cache.
+   */
+  async peekUsageFromCache(organizationId: string): Promise<any | null> {
+    const fullKey = `usage:org:${organizationId}`;
+    const profileKey = `usage:org:${organizationId}:profile`;
+    try {
+      const { default: redisClient, isRedisAvailable } = await import('../../config/redis');
+      if (isRedisAvailable()) {
+        const fullRaw = await redisClient.get(fullKey);
+        if (fullRaw) {
+          return JSON.parse(fullRaw);
+        }
+        const profileRaw = await redisClient.get(profileKey);
+        if (profileRaw) {
+          return JSON.parse(profileRaw);
+        }
+      }
+    } catch (e: any) {
+      logger.debug(`[Usage Tracker] peekUsageFromCache redis: ${e?.message}`);
+    }
+    const localFull = localCacheGet(fullKey);
+    if (localFull) {
+      return localFull;
+    }
+    const localProfile = localCacheGet(profileKey);
+    if (localProfile) {
+      return localProfile;
+    }
+    return null;
+  }
+
+  /**
    * Get comprehensive usage for an organization (with optional caching).
    *
    * Cache hierarchy:
@@ -233,9 +269,25 @@ export class UsageTrackerService {
    *   2. In-process Map (per-instance, 60 s TTL) — fallback when Redis is down
    *   3. Full recompute — only when both caches miss
    */
-  async getOrganizationUsage(organizationId: string, useCache: boolean = true) {
+  /**
+   * @param options.profileOnly — Skip expensive counts not needed for auth profile
+   *   (thread-style conversation count, campaign sends). Uses a separate cache key.
+   * @param options.authInstant — Login / profile path: on cache miss, return `authFallback` immediately
+   *   and recompute usage in the background so auth never blocks on heavy aggregates.
+   */
+  async getOrganizationUsage(
+    organizationId: string,
+    useCache: boolean = true,
+    options?: {
+      profileOnly?: boolean;
+      authInstant?: boolean;
+      authFallback?: { callMinutes: number; chatMessages: number; automations: number };
+    }
+  ) {
     try {
-      const cacheKey = `usage:org:${organizationId}`;
+      const profileOnly = !!options?.profileOnly;
+      const authInstant = !!options?.authInstant;
+      const cacheKey = profileOnly ? `usage:org:${organizationId}:profile` : `usage:org:${organizationId}`;
 
       if (useCache) {
         // 1. Try Redis
@@ -259,13 +311,45 @@ export class UsageTrackerService {
         }
       }
 
-      const [callMinutes, chatMessages, conversations, automations, campaignSends] = await Promise.all([
-        this.calculateCallMinutes(organizationId),
-        this.calculateChatMessages(organizationId),
-        this.calculateConversations(organizationId),
-        this.calculateActiveAutomations(organizationId),
-        this.calculateCampaignSends(organizationId)
-      ]);
+      if (authInstant && options?.authFallback) {
+        const fb = options.authFallback;
+        const stale = {
+          callMinutes: fb.callMinutes,
+          chatMessages: fb.chatMessages,
+          conversations: 0,
+          automations: fb.automations,
+          campaignSends: 0,
+          calculatedAt: new Date()
+        };
+        if (!profileUsageWarmInFlight.has(organizationId)) {
+          profileUsageWarmInFlight.add(organizationId);
+          void this.getOrganizationUsage(organizationId, true, { profileOnly })
+            .catch((err: any) => {
+              logger.warn(`[Usage Tracker] Background usage warm failed for ${organizationId}:`, err?.message);
+            })
+            .finally(() => {
+              profileUsageWarmInFlight.delete(organizationId);
+            });
+        }
+        logger.debug(`[Usage Tracker] authInstant stale usage for org ${organizationId} (background warm if not in flight)`);
+        return stale;
+      }
+
+      const [callMinutes, chatMessages, conversations, automations, campaignSends] = profileOnly
+        ? await Promise.all([
+            this.calculateCallMinutes(organizationId),
+            this.calculateChatMessages(organizationId),
+            Promise.resolve(0),
+            this.calculateActiveAutomations(organizationId),
+            Promise.resolve(0)
+          ])
+        : await Promise.all([
+            this.calculateCallMinutes(organizationId),
+            this.calculateChatMessages(organizationId),
+            this.calculateConversations(organizationId),
+            this.calculateActiveAutomations(organizationId),
+            this.calculateCampaignSends(organizationId)
+          ]);
 
       const usageData = {
         callMinutes,
@@ -303,10 +387,13 @@ export class UsageTrackerService {
    * Clear usage cache for an organization (call this after significant events)
    */
   async clearUsageCache(organizationId: string): Promise<void> {
+    localUsageCache.delete(`usage:org:${organizationId}`);
+    localUsageCache.delete(`usage:org:${organizationId}:profile`);
     try {
       const { default: redisClient, isRedisAvailable } = await import('../../config/redis');
       if (isRedisAvailable()) {
         await redisClient.del(`usage:org:${organizationId}`);
+        await redisClient.del(`usage:org:${organizationId}:profile`);
         logger.debug(`[Usage Tracker] Cleared usage cache for org ${organizationId}`);
       }
     } catch (error: any) {

@@ -8,7 +8,24 @@ interface CaptchaVerificationResponse {
   'error-codes'?: string[];
 }
 
+/** Must match frontend/lib/devCaptchaBypass.ts */
+const DEV_CAPTCHA_BYPASS_TOKEN = '__AISTEIN_DEV_CAPTCHA_BYPASS_v1__';
+
+function isDevCaptchaBypassAllowed(): boolean {
+  if (process.env.NODE_ENV === 'development') {
+    return true;
+  }
+  return process.env.ALLOW_LOCAL_CAPTCHA_BYPASS === 'true';
+}
+
 export async function verifyCaptchaToken(captchaToken: string, remoteIp?: string): Promise<void> {
+  if (captchaToken === DEV_CAPTCHA_BYPASS_TOKEN) {
+    if (!isDevCaptchaBypassAllowed()) {
+      throw new AppError(400, 'CAPTCHA_FAILED', 'Captcha verification failed');
+    }
+    return;
+  }
+
   const recaptchaSecret =
     process.env.RECAPTCHA_SECRET_KEY ||
     process.env.CAPTCHA_SECRET_KEY;
