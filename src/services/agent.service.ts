@@ -333,17 +333,6 @@ export class AgentService {
     return 'eleven_flash_v2';
   }
 
-  /**
-   * Python/ElevenLabs rejects mixing inline `tools` with `tool_ids` on prompt PATCH.
-   * We configure tools via `built_in_tools` only; strip these keys so nothing re-injects IDs.
-   */
-  private stripDisallowedPromptPatchPayload(payload: Record<string, any>): Record<string, any> {
-    const out = { ...payload };
-    delete out.tool_ids;
-    delete out.tools;
-    return out;
-  }
-
   private buildSafePromptSyncBody(agent: any, _toolIds: string[]): Record<string, any> {
     const dbFirst = typeof agent?.first_message === 'string' ? agent.first_message.trim() : '';
     const dbGreeting = typeof agent?.greeting_message === 'string' ? agent.greeting_message.trim() : '';
@@ -422,12 +411,11 @@ export class AgentService {
     }
 
     const pythonUrl = `${PYTHON_API_BASE_URL}/api/v1/agents/${agentId}/prompt`;
-    const promptPatchPayload = this.stripDisallowedPromptPatchPayload(requestBody as Record<string, any>);
     console.log('[Agent Service] PATCH prompt immediately after create:', pythonUrl);
     console.log('[Agent Service] post_call_webhook_url:', postCallWebhookUrl ? '(set)' : '(not set)');
-    console.log('[Agent Service] 📦 Prompt PATCH body (sanitized):', JSON.stringify(promptPatchPayload, null, 2));
+    console.log('[Agent Service] 📦 Prompt PATCH body:', JSON.stringify(requestBody, null, 2));
 
-    await axios.patch(pythonUrl, promptPatchPayload, {
+    await axios.patch(pythonUrl, requestBody, {
       timeout: 30000,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -453,6 +441,7 @@ export class AgentService {
       console.log(`[Agent Service] Found ${toolIds.length} email template tool_ids for user ${userId}`);
       return toolIds;
     } catch (error: any) {
+      
       console.warn('[Agent Service] Failed to fetch email template tool_ids:', error.message);
       return []; // Return empty array on error to not block agent creation
     }
@@ -624,9 +613,7 @@ export class AgentService {
       const pythonUrl = `${PYTHON_API_BASE_URL}/api/v1/agents/${agentId}/prompt`;
 
       // Keep sync payload strict to avoid mutating prompt semantics in ElevenLabs.
-      const requestBody: any = this.stripDisallowedPromptPatchPayload(
-        this.buildSafePromptSyncBody(agent, toolIds) as Record<string, any>
-      );
+      const requestBody: any = this.buildSafePromptSyncBody(agent, toolIds);
 
       await axios.patch(pythonUrl, requestBody, {
         timeout: 30000,
@@ -671,9 +658,7 @@ export class AgentService {
         return;
       }
 
-      const requestBody = this.stripDisallowedPromptPatchPayload(
-        this.buildSafePromptSyncBody(agent, toolIds) as Record<string, any>
-      );
+      const requestBody = this.buildSafePromptSyncBody(agent, toolIds);
 
       await axios.patch(pythonUrl, requestBody, {
         timeout: 30000,
@@ -964,7 +949,8 @@ export class AgentService {
     );
     const builtInToolsPayload = buildBuiltInToolsPythonPayload(mergedBuiltInInput, builtInToolFlags);
 
-    const requestBody: any = {
+    // PATCH body: explicit keys only — never tool_ids (built_in_tools only for tools).
+    const patchBody: Record<string, unknown> = {
       first_message: firstMessageToSend,
       system_prompt: systemPromptToSend,
       language: data.language,
@@ -972,19 +958,22 @@ export class AgentService {
       built_in_tools: builtInToolsPayload
     };
 
-    // CRITICAL: Always include voice_id if provided (even if empty string)
-    // This ensures ElevenLabs gets the voice_id update
     if (data.voice_id !== undefined) {
-      requestBody.voice_id = data.voice_id;
+      patchBody.voice_id = data.voice_id;
     }
 
     if (data.enable_human_transfer !== undefined) {
-      requestBody.enable_human_transfer = data.enable_human_transfer;
-      requestBody.human_transfer_rules = data.enable_human_transfer
+      patchBody.enable_human_transfer = data.enable_human_transfer;
+      patchBody.human_transfer_rules = data.enable_human_transfer
         ? Array.isArray(data.human_transfer_rules)
           ? data.human_transfer_rules
           : []
         : [];
+    }
+
+    const postCallWebhookUrl = process.env.POST_CALL_WEBHOOK_URL?.trim();
+    if (postCallWebhookUrl) {
+      patchBody.post_call_webhook_url = postCallWebhookUrl;
     }
 
     const logContext = (action: string) => ({
@@ -995,24 +984,21 @@ export class AgentService {
       languageChanged: (agent as any).language !== data.language
     });
 
-    const promptPatchPayload = this.stripDisallowedPromptPatchPayload(requestBody);
-
     console.log('[Agent Service] updateAgentPrompt START', logContext('update'));
     console.log('[Agent Service] Request summary:', {
       language: data.language,
       knowledge_base_ids_count: validKnowledgeBaseIds.length,
-      tool_ids_count: toolIds.length,
       voice_id: data.voice_id,
       has_voice_id: !!data.voice_id
     });
     console.log('[Agent Service] 🎤 Voice ID being sent to Python API:', data.voice_id);
-    console.log('[Agent Service] 📦 Prompt PATCH body to Python API (sanitized):', JSON.stringify(promptPatchPayload, null, 2));
+    console.log('[Agent Service] 📦 PATCH /agents/.../prompt body:', JSON.stringify(patchBody, null, 2));
 
     try {
       const pythonUrl = `${PYTHON_API_BASE_URL}/api/v1/agents/${agentId}/prompt`;
       console.log('[Agent Service] 🔗 Python API URL:', pythonUrl);
 
-      const response = await axios.patch<UpdateAgentPromptResponse>(pythonUrl, promptPatchPayload, {
+      const response = await axios.patch<UpdateAgentPromptResponse>(pythonUrl, patchBody, {
         timeout: 30000,
         headers: { 'Content-Type': 'application/json' }
       });
