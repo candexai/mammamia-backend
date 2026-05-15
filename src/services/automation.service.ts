@@ -128,7 +128,44 @@ function resolveTimeFromTranscript(transcriptText: string): string | null {
       .trim();
   const normalized = normalize(text);
 
-  const numericMatches = [...normalized.matchAll(/\b(?:alle|at|ore)?\s*(\d{1,2})([:.](\d{2}))?\s*(am|pm)?\b/g)];
+  const colonMatches = [...normalized.matchAll(/\b(\d{1,2})[:.](\d{2})\s*(am|pm)?\b/g)];
+  if (colonMatches.length > 0) {
+    const last = colonMatches[colonMatches.length - 1];
+    let hour = Number(last[1]);
+    const minute = Number(last[2]);
+    const meridiem = (last[3] || '').toLowerCase();
+    if (Number.isFinite(hour) && Number.isFinite(minute) && hour >= 0 && hour <= 23) {
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    }
+  }
+
+  const compactMeridiem = [...normalized.matchAll(/\b(\d{1,2})\s*(am|pm)\b/g)];
+  if (compactMeridiem.length > 0) {
+    const last = compactMeridiem[compactMeridiem.length - 1];
+    let hour = Number(last[1]);
+    const meridiem = (last[2] || '').toLowerCase();
+    if (Number.isFinite(hour) && hour >= 1 && hour <= 12) {
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      return `${String(hour).padStart(2, '0')}:00`;
+    }
+  }
+
+  const atHourMatches = [...normalized.matchAll(/\bat\s+(\d{1,2})(?:\s*(am|pm))?\b/g)];
+  if (atHourMatches.length > 0) {
+    const last = atHourMatches[atHourMatches.length - 1];
+    let hour = Number(last[1]);
+    const meridiem = (last[2] || '').toLowerCase();
+    if (Number.isFinite(hour) && hour >= 0 && hour <= 23) {
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      return `${String(hour).padStart(2, '0')}:00`;
+    }
+  }
+
+  const numericMatches = [...normalized.matchAll(/\b(?:alle|at|ore)\s+(\d{1,2})([:.](\d{2}))?\s*(am|pm)?\b/g)];
   if (numericMatches.length > 0) {
     const last = numericMatches[numericMatches.length - 1];
     let hour = Number(last[1]);
@@ -155,6 +192,228 @@ function resolveTimeFromTranscript(transcriptText: string): string | null {
     if (hour != null) return `${String(hour).padStart(2, '0')}:00`;
   }
   return null;
+}
+
+const HARD_NEGATIVE_CUSTOMER_RE =
+  /\b(non\s+mi\s+interessa|non\s+sono\s+interessat[oa]|non\s+interessat[oa]|non\s+confermo|non\s+prenotare|richiamami|devo\s+pensarci|forse\s+piu\s+tardi|magari\s+piu\s+tardi|not\s+interested|no\s+thanks|don'?t\s+call|call\s+me\s+back\s+later|maybe\s+later)\b/i;
+
+const CUSTOMER_MONTH_DATE_RE =
+  /\b\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre|january|february|march|april|may|june|july|august|september|october|november|december)\b/i;
+
+const CUSTOMER_ORDINAL_DATE_RE =
+  /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre|january|february|march|april|may|june|july|august|september|october|november|december)(?:\s*,?\s*20\d{2})?\b/i;
+
+export function extractCustomerLines(transcriptText: string): string {
+  return transcriptText
+    .split('\n')
+    .filter((line) => /^Customer:/i.test(line.trim()))
+    .map((line) => line.replace(/^Customer:\s*/i, '').trim())
+    .join('\n');
+}
+
+export interface CustomerSlotInfo {
+  hasDate: boolean;
+  hasTime: boolean;
+  resolvedDate: string | null;
+  resolvedTime: string | null;
+}
+
+export function customerProvidedDateAndTime(customerText: string, now: Date): CustomerSlotInfo {
+  const trimmed = customerText.trim();
+  if (!trimmed) {
+    return { hasDate: false, hasTime: false, resolvedDate: null, resolvedTime: null };
+  }
+  const resolvedDate = resolveRelativeDateFromTranscript(trimmed, now);
+  const resolvedTime = resolveTimeFromTranscript(trimmed);
+  const hasIsoDate = /\b20\d{2}-\d{2}-\d{2}\b/.test(trimmed);
+  const hasNumericDate = /\b\d{1,2}[\/\-\.]\d{1,2}(?:[\/\-\.]\d{2,4})?\b/.test(trimmed);
+  const hasMonthDate = CUSTOMER_MONTH_DATE_RE.test(trimmed);
+  const hasOrdinalDate = CUSTOMER_ORDINAL_DATE_RE.test(trimmed);
+  const hasDate = !!(resolvedDate || hasIsoDate || hasNumericDate || hasMonthDate || hasOrdinalDate);
+  const hasTime = !!resolvedTime;
+  return {
+    hasDate,
+    hasTime,
+    resolvedDate: resolvedDate || (hasIsoDate ? trimmed.match(/\b(20\d{2}-\d{2}-\d{2})\b/)?.[1] ?? null : null),
+    resolvedTime
+  };
+}
+
+function customerHardNegativeInLastTurns(transcriptText: string): boolean {
+  const customerLines = transcriptText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^Customer:/i.test(l));
+  const last = customerLines.slice(-3);
+  return last.some((line) => HARD_NEGATIVE_CUSTOMER_RE.test(line.replace(/^Customer:\s*/i, '')));
+}
+
+export function buildAppointmentExtractionSystemPrompt(
+  temporalReferenceBlock: string,
+  currentYear: number
+): string {
+  return `You are a multilingual appointment extraction AI (Italian and English phone/chat transcripts).
+
+BOOKING RULE — appointment_booked = true ONLY when the CUSTOMER provides BOTH:
+1. A concrete DATE (calendar date, weekday, or relative day like oggi/domani/tomorrow/Monday), AND
+2. A concrete CLOCK TIME (HH:MM, "alle 15", "2pm", "at three", etc.)
+
+The date and time may appear in separate customer turns (e.g. agent asks date → customer answers → agent asks time → customer answers).
+
+Set appointment_booked = FALSE when:
+- Customer is not interested or declines (Italian: non mi interessa, forse, richiamami; English: not interested, call back later).
+- Customer gives only a date OR only a time, never both.
+- Only the agent states date/time (e.g. reading an address with numbers) and the customer never supplies scheduling details.
+- Time is vague only ("pomeriggio", "morning") without an hour.
+- You are uncertain (confidence below 0.75 → must be false).
+
+Do NOT treat street/building numbers as times (e.g. "Viale Roma 19" is NOT 19:00).
+
+When appointment_booked is true, date and time must both be non-null.
+When false, set date and time to null.
+
+${temporalReferenceBlock}
+
+Current calendar year when year omitted: ${currentYear}
+
+Respond ONLY with valid JSON (no markdown):
+{"appointment_booked":true,"date":"YYYY-MM-DD","time":"HH:MM","confidence":0.0-1.0,"reason":"short explanation"}
+or
+{"appointment_booked":false,"date":null,"time":null,"confidence":0.0-1.0,"reason":"short explanation"}`;
+}
+
+export function applyAppointmentSafetyValidation(
+  parsed: Record<string, any>,
+  transcriptText: string,
+  now: Date
+): void {
+  const customerText = extractCustomerLines(transcriptText);
+  const slot = customerProvidedDateAndTime(customerText, now);
+
+  if (customerHardNegativeInLastTurns(transcriptText)) {
+    parsed.appointment_booked = false;
+    parsed.date = null;
+    parsed.time = null;
+    parsed.reason =
+      typeof parsed.reason === 'string' && parsed.reason.trim()
+        ? `${parsed.reason.trim()} [customer decline detected]`
+        : '[customer decline detected]';
+    return;
+  }
+
+  if (parsed.appointment_booked === true && (!slot.hasDate || !slot.hasTime)) {
+    parsed.appointment_booked = false;
+    parsed.date = null;
+    parsed.time = null;
+    parsed.reason =
+      typeof parsed.reason === 'string' && parsed.reason.trim()
+        ? `${parsed.reason.trim()} [customer did not provide both date and time]`
+        : '[customer did not provide both date and time]';
+    return;
+  }
+
+  if (
+    parsed.appointment_booked !== true &&
+    slot.hasDate &&
+    slot.hasTime &&
+    !customerHardNegativeInLastTurns(transcriptText)
+  ) {
+    parsed.appointment_booked = true;
+    if (slot.resolvedDate) parsed.date = slot.resolvedDate;
+    if (slot.resolvedTime) parsed.time = slot.resolvedTime;
+    const confRaw = parsed.confidence;
+    const confNum =
+      typeof confRaw === 'number' && !Number.isNaN(confRaw)
+        ? confRaw
+        : typeof confRaw === 'string'
+          ? parseFloat(confRaw)
+          : NaN;
+    if (!Number.isFinite(confNum) || confNum < 0.85) parsed.confidence = 0.85;
+    parsed.reason =
+      typeof parsed.reason === 'string' && parsed.reason.trim()
+        ? `${parsed.reason.trim()} [customer provided date+time]`
+        : '[customer provided date+time]';
+  }
+
+  if (parsed.appointment_booked === true) {
+    const d = parsed.date != null ? String(parsed.date).trim() : '';
+    const t = parsed.time != null ? String(parsed.time).trim() : '';
+    if (!d || !t || d.toLowerCase() === 'null' || t.toLowerCase() === 'null') {
+      parsed.appointment_booked = false;
+      parsed.date = null;
+      parsed.time = null;
+    }
+  }
+}
+
+function applyAppointmentPostProcess(
+  parsed: Record<string, any>,
+  transcriptText: string,
+  now: Date
+): void {
+  if ('appointment_booked' in parsed) {
+    const coerced = coerceAppointmentBooked(parsed.appointment_booked);
+    if (coerced !== undefined) parsed.appointment_booked = coerced;
+  }
+
+  const confRaw = parsed.confidence;
+  const confNum =
+    typeof confRaw === 'number' && !Number.isNaN(confRaw)
+      ? confRaw
+      : typeof confRaw === 'string'
+        ? parseFloat(confRaw)
+        : NaN;
+  if (Number.isFinite(confNum) && confNum < 0.75 && parsed.appointment_booked === true) {
+    parsed.appointment_booked = false;
+    parsed.date = null;
+    parsed.time = null;
+    const tag = `[enforced: confidence ${confNum} < 0.75]`;
+    parsed.reason =
+      typeof parsed.reason === 'string' && parsed.reason.trim()
+        ? `${parsed.reason.trim()} ${tag}`
+        : tag;
+  }
+
+  if (parsed.appointment_booked !== true) {
+    parsed.appointment_booked = false;
+    parsed.date = null;
+    parsed.time = null;
+    return;
+  }
+
+  const customerText = extractCustomerLines(transcriptText);
+  const slot = customerProvidedDateAndTime(customerText, now);
+  if (slot.resolvedDate && (parsed.date == null || String(parsed.date).trim() === '')) {
+    parsed.date = slot.resolvedDate;
+  }
+  if (slot.resolvedTime && (parsed.time == null || String(parsed.time).trim() === '')) {
+    parsed.time = slot.resolvedTime;
+  }
+}
+
+export function resolveFinalAppointmentBooked(
+  apptBookedRaw: unknown,
+  finalDate: string | undefined | null,
+  finalTime: string | undefined | null
+): boolean {
+  if (
+    apptBookedRaw === false ||
+    apptBookedRaw === 'false' ||
+    apptBookedRaw === 'False' ||
+    apptBookedRaw === 0 ||
+    apptBookedRaw === '0'
+  ) {
+    return false;
+  }
+  const explicitTrue =
+    apptBookedRaw === true ||
+    apptBookedRaw === 'true' ||
+    apptBookedRaw === 'True' ||
+    apptBookedRaw === 1 ||
+    apptBookedRaw === '1';
+  const hasDate = !!String(finalDate ?? '').trim();
+  const hasTime = !!String(finalTime ?? '').trim();
+  return explicitTrue && hasDate && hasTime;
 }
 
 export class AutomationService {
@@ -542,42 +801,10 @@ ${exampleJson}
 
 Respond ONLY with valid JSON matching the above keys. No extra keys, no explanation.`;
       } else {
-        systemPrompt = extractionType === 'appointment'
-          ? `You are an AI assistant that extracts appointment information from phone/chat transcripts (roles may be labeled Agent/Assistant vs Customer/User).
-
-Your job is to decide whether a meeting, callback, or appointment was effectively BOOKED or AGREED—not whether the customer alone stated every detail.
-
-Set appointment_booked to TRUE if ANY of these are true:
-- The customer and agent reached a clear agreement on a specific time slot (date and/or time), including when the agent proposed slot(s) and the customer accepted (e.g. "yes", "okay", "that works", "perfect", "book it", "see you then", "confirmed").
-- The customer asked to book / schedule / set up a meeting or callback AND the conversation moves to concrete timing (even if only the agent states the final slot after the customer agrees).
-- The customer provided date and/or time, OR confirmed a time the agent suggested.
-- The agent summarizes a confirmed appointment and the customer does not object (assent or thanks counts as agreement).
-
-Set appointment_booked to FALSE only if:
-- There is no scheduling agreement (small talk only, hang up, or only "we'll call you back" with no time), OR
-- The customer clearly declined, cancelled, or refused to schedule.
-
-IMPORTANT:
-- Do NOT require the customer to repeat the date/time in their own words. If the agent states the slot and the customer accepts, that is BOOKED.
-- If the agent said "unable to confirm" or "system error" but the customer still provided or agreed to a specific time, set appointment_booked to TRUE.
-- If you are unsure but there is likely a concrete meeting time, prefer TRUE and use a lower confidence (e.g. 0.5–0.7).
-
-Extract for the AGREED or PRIMARY slot (use agent-stated time if that is what was confirmed):
-1. Date in YYYY-MM-DD format (convert "4 February" → "${currentYear}-02-04", use year ${currentYear} when not stated)
-2. Time in HH:MM 24-hour format (convert "6 PM" → "18:00", "3 PM" → "15:00", "4 p.m." → "16:00")
-
-${temporalReferenceBlock}
-
-Current calendar year for resolving relative dates: ${currentYear}
-
-Respond ONLY with valid JSON:
-{
-  "appointment_booked": true/false,
-  "date": "YYYY-MM-DD" or null,
-  "time": "HH:MM" or null,
-  "confidence": 0.0-1.0
-}`
-          : `Extract lead information from the conversation.`;
+        systemPrompt =
+          extractionType === 'appointment'
+            ? buildAppointmentExtractionSystemPrompt(temporalReferenceBlock, currentYear)
+            : `Extract lead information from the conversation.`;
       }
 
       const completion = await openai.chat.completions.create({
@@ -602,19 +829,13 @@ Respond ONLY with valid JSON:
         };
       }
 
-      // Legacy appointment: model sometimes returns string "true"/"false" (dynamic path already coerces)
-      if (!useDynamicExtraction && extractionType === 'appointment' && 'appointment_booked' in parsed) {
-        const coerced = coerceAppointmentBooked(parsed.appointment_booked);
-        if (coerced !== undefined) parsed.appointment_booked = coerced;
+      if (!useDynamicExtraction && extractionType === 'appointment') {
+        applyAppointmentSafetyValidation(parsed, transcriptText, now);
+        applyAppointmentPostProcess(parsed, transcriptText, now);
       }
+
       const resolvedRelativeDate = resolveRelativeDateFromTranscript(transcriptText, now);
       const resolvedRelativeTime = resolveTimeFromTranscript(transcriptText);
-      if (resolvedRelativeDate && extractionType === 'appointment') {
-        parsed.date = resolvedRelativeDate;
-      }
-      if (resolvedRelativeTime && extractionType === 'appointment' && (parsed.time == null || String(parsed.time).trim() === '')) {
-        parsed.time = resolvedRelativeTime;
-      }
 
       if (useDynamicExtraction && options.json_example) {
         const extracted_data: Record<string, any> = {};
@@ -630,19 +851,24 @@ Respond ONLY with valid JSON:
           }
           extracted_data[key] = val;
         }
-        if (resolvedRelativeDate) {
-          const dateLikeKeys = ['date', 'appointment_date', 'preferred_date', 'appointmentDate', 'preferredDate'];
-          for (const k of dateLikeKeys) {
-            if (k in extracted_data) {
-              extracted_data[k] = resolvedRelativeDate;
+        const dynamicBooked =
+          extracted_data.appointment_booked === true ||
+          extracted_data.appointment_booked === 'true';
+        if (dynamicBooked) {
+          const customerText = extractCustomerLines(transcriptText);
+          const customerSlot = customerProvidedDateAndTime(customerText, now);
+          const fillDate = customerSlot.resolvedDate || resolvedRelativeDate;
+          const fillTime = customerSlot.resolvedTime || resolvedRelativeTime;
+          if (fillDate) {
+            const dateLikeKeys = ['date', 'appointment_date', 'preferred_date', 'appointmentDate', 'preferredDate'];
+            for (const k of dateLikeKeys) {
+              if (k in extracted_data) extracted_data[k] = fillDate;
             }
           }
-        }
-        if (resolvedRelativeTime) {
-          const timeLikeKeys = ['time', 'appointment_time', 'preferred_time', 'appointmentTime', 'preferredTime'];
-          for (const k of timeLikeKeys) {
-            if (k in extracted_data) {
-              extracted_data[k] = resolvedRelativeTime;
+          if (fillTime) {
+            const timeLikeKeys = ['time', 'appointment_time', 'preferred_time', 'appointmentTime', 'preferredTime'];
+            for (const k of timeLikeKeys) {
+              if (k in extracted_data) extracted_data[k] = fillTime;
             }
           }
         }
@@ -657,13 +883,17 @@ Respond ONLY with valid JSON:
 
         console.log('[Automation Service] Dynamic extraction result:', { conversationId, extracted_data });
 
+        const dynamicBookedFinal =
+          extracted_data.appointment_booked === true ||
+          extracted_data.appointment_booked === 'true';
         return {
           success: true,
           conversation_id: conversationId,
           extraction_type: extractionType || 'custom',
           extracted_data,
-          date: resolvedRelativeDate || null,
-          time: resolvedRelativeTime || null,
+          appointment_booked: dynamicBookedFinal,
+          date: dynamicBookedFinal ? extracted_data.date ?? null : null,
+          time: dynamicBookedFinal ? extracted_data.time ?? null : null,
           transcript_turns: transcriptTurns,
           duration_seconds: durationSeconds,
           method: 'llm'

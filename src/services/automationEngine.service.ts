@@ -1055,13 +1055,14 @@ export class AutomationEngine {
 
         const apptBookedRaw =
           ed.appointment_booked != null ? ed.appointment_booked : result.appointment_booked;
-        const finalBooked =
-          apptBookedRaw === true ||
-          apptBookedRaw === 'true' ||
-          ((apptBookedRaw === undefined || apptBookedRaw === null || apptBookedRaw === '') &&
-            !!(finalDate || finalTime));
+        const { resolveFinalAppointmentBooked } = await import('./automation.service');
+        const finalBooked = resolveFinalAppointmentBooked(apptBookedRaw, finalDate, finalTime);
+        const resolvedTime = finalBooked ? finalTime : '';
 
-        const resolvedTime = finalTime || (finalDate ? '09:00' : '');
+        if (!finalBooked) {
+          finalDate = '';
+          finalTime = '';
+        }
 
         context.appointment = {
           booked: finalBooked,
@@ -1877,15 +1878,14 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
 
           const apptBookedRaw =
             ed.appointment_booked != null ? ed.appointment_booked : result.appointment_booked;
-          const finalBooked =
-            apptBookedRaw === true ||
-            apptBookedRaw === 'true' ||
-            ((apptBookedRaw === undefined || apptBookedRaw === null || apptBookedRaw === '') &&
-              !!(finalDate || finalTime));
+          const { resolveFinalAppointmentBooked } = await import('./automation.service');
+          const finalBooked = resolveFinalAppointmentBooked(apptBookedRaw, finalDate, finalTime);
+          const resolvedTime = finalBooked ? finalTime : '';
 
-          // Default the time when only the date was extracted, so calendar slots
-          // still resolve to something sensible.
-          const resolvedTime = finalTime || (finalDate ? '09:00' : '');
+          if (!finalBooked) {
+            finalDate = '';
+            finalTime = '';
+          }
 
           // ── Update both context.appointment AND context.extracted with merged values ──
           context.appointment = {
