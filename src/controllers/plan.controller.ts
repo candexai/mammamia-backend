@@ -25,7 +25,9 @@ export class PlanController {
    */
   async getAllPlans(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const plans = await planService.findAllPlans();
+      const isAdmin = (req as any).user?.role === 'admin';
+      const includeInactive = isAdmin && req.query.includeInactive === 'true';
+      const plans = await planService.findAllPlans(includeInactive);
       
       res.status(200).json({
         success: true,
