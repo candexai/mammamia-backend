@@ -988,14 +988,26 @@ export class AutomationEngine {
 
         if (!conversationId) throw new Error('Conversation ID is required for extraction.');
 
-        const options = extraction_prompt && json_example ? { extraction_prompt, json_example } : undefined;
         const { automationService } = await import('./automation.service');
-        const result = await automationService.extractConversationData(
-          conversationId,
-          extractionType,
-          context.organizationId,
-          options
-        ) as { success: boolean; appointment_booked?: boolean | string; date?: string; time?: string; confidence?: number; extracted_data?: Record<string, any>; error?: string };
+        const usePythonAppointmentApi =
+          extractionType === 'appointment' ||
+          (!!extraction_prompt && !!json_example);
+        const result = usePythonAppointmentApi
+          ? await automationService.extractAppointmentForAutomation(
+              conversationId,
+              context.organizationId,
+              {
+                extraction_type: extractionType,
+                extraction_prompt,
+                json_example
+              }
+            )
+          : await automationService.extractConversationData(
+              conversationId,
+              extractionType,
+              context.organizationId,
+              extraction_prompt && json_example ? { extraction_prompt, json_example } : undefined
+            );
 
         // Reuse the same merge/normalize logic as aistein_extract_appointment
         const ed: Record<string, any> = (result.extracted_data || {}) as Record<string, any>;
@@ -1064,11 +1076,14 @@ export class AutomationEngine {
           finalTime = '';
         }
 
+        const extractionConfidence =
+          (result as { confidence?: number }).confidence ?? ed.confidence;
+
         context.appointment = {
           booked: finalBooked,
           date: finalDate || undefined,
           time: resolvedTime || undefined,
-          confidence: result.confidence ?? ed.confidence
+          confidence: extractionConfidence
         };
 
         context.extracted = {
@@ -1784,40 +1799,22 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
         }
 
         const extraction_type = config.extraction_type || 'appointment';
-        const extractionTypeNorm = String(extraction_type).toLowerCase();
-        const extraction_prompt = config.extraction_prompt;
-        const json_example = config.json_example && typeof config.json_example === 'object' ? config.json_example : undefined;
-        const schemaKeys = Object.keys(json_example || {}).map((k) => String(k).toLowerCase());
-        const APPOINTMENT_CORE_KEYS = new Set(['appointment_booked', 'date', 'time', 'confidence']);
-        const hasCustomSchemaFields = schemaKeys.some((k) => !APPOINTMENT_CORE_KEYS.has(k));
-        // Stale UI/config often leaves extraction_prompt + json_example (e.g. lead: interested/occupation) on
-        // "appointment" automations — that forced dynamic mode and returned wrong booleans. Use the dedicated
-        // appointment LLM unless user explicitly opts in (dynamic_extraction) or extraction is non-appointment.
-        const useDynamicSchema =
-          !!extraction_prompt &&
-          !!json_example &&
-          (
-            config.dynamic_extraction === true ||
-            extractionTypeNorm !== 'appointment' ||
-            // If schema asks for any non-core field (e.g. address/budget), honor it
-            // even for appointment extraction.
-            hasCustomSchemaFields
-          );
-        const options = useDynamicSchema ? { extraction_prompt, json_example } : undefined;
+        const extraction_prompt =
+          (typeof config.extraction_prompt === 'string' && config.extraction_prompt.trim()) || undefined;
+        const json_example =
+          config.json_example && typeof config.json_example === 'object' ? config.json_example : undefined;
 
         console.log(
-          `[Automation Engine] 🧠 Extracting data from conversation: ${resolvedConvId}`,
-          options ? '(dynamic)' : `(${extraction_type})`
+          `[Automation Engine] 🧠 Extracting appointment via Python extract-data API: ${resolvedConvId}`
         );
 
         try {
           const { automationService } = await import('./automation.service');
-          const result = await automationService.extractConversationData(
+          const result = await automationService.extractAppointmentForAutomation(
             resolvedConvId,
-            extraction_type,
             context.organizationId,
-            options
-          ) as { success: boolean; appointment_booked?: boolean | string; date?: string; time?: string; confidence?: number; extracted_data?: Record<string, any>; error?: string };
+            { extraction_type, extraction_prompt, json_example }
+          );
 
           console.log(`[Automation Engine] ✅ Extraction result:`, result.success ? (result.extracted_data || { appointment_booked: result.appointment_booked, date: result.date, time: result.time }) : result.error);
 
@@ -1887,12 +1884,15 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
             finalTime = '';
           }
 
+          const extractionConfidence =
+            (result as { confidence?: number }).confidence ?? ed.confidence;
+
           // ── Update both context.appointment AND context.extracted with merged values ──
           context.appointment = {
             booked: finalBooked,
             date: finalDate || undefined,
             time: resolvedTime || undefined,
-            confidence: result.confidence ?? ed.confidence
+            confidence: extractionConfidence
           };
 
           context.extracted = {
@@ -1921,7 +1921,7 @@ const metaUrl = `https://graph.facebook.com/v21.0/${integration.credentials.waba
             date: finalDate || null,
             time: resolvedTime || null,
             extracted_data: result.extracted_data,
-            confidence: result.confidence ?? 0,
+            confidence: extractionConfidence ?? 0,
             reason: result.error
           };
         } catch (error: any) {

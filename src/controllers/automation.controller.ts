@@ -429,17 +429,30 @@ export class AutomationController {
         throw new Error('Organization ID not found');
       }
 
-      const options =
-        extraction_prompt && json_example && typeof json_example === 'object'
-          ? { extraction_prompt, json_example }
+      const prompt =
+        typeof extraction_prompt === 'string' && extraction_prompt.trim()
+          ? extraction_prompt.trim()
           : undefined;
+      const example =
+        json_example && typeof json_example === 'object' ? json_example : undefined;
 
-      const result = await this.automationService.extractConversationData(
-        conversation_id,
-        extraction_type,
-        organizationId.toString(),
-        options
-      );
+      const result =
+        extraction_type === 'appointment' || (prompt && example)
+          ? await this.automationService.extractAppointmentForAutomation(
+              conversation_id,
+              organizationId.toString(),
+              {
+                extraction_type,
+                extraction_prompt: prompt,
+                json_example: example
+              }
+            )
+          : await this.automationService.extractConversationData(
+              conversation_id,
+              extraction_type,
+              organizationId.toString(),
+              prompt && example ? { extraction_prompt: prompt, json_example: example } : undefined
+            );
 
       res.json(result);
     } catch (error) {

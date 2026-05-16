@@ -1,9 +1,38 @@
+import axios from 'axios';
 import mongoose from 'mongoose';
 import Automation from '../models/Automation';
 import AutomationExecution from '../models/AutomationExecution';
 import { AutomationEngine } from './automationEngine.service';
 import { AppError } from '../middleware/error.middleware';
 import { profileService } from './profile.service';
+
+const PYTHON_API_BASE_URL =
+  process.env.PYTHON_API_URL || process.env.COMM_API_URL || 'https://elvenlabs-voiceagent.onrender.com';
+
+/** Tested appointment extraction schema (Python /api/v1/automation/extract-data). */
+export const DEFAULT_APPOINTMENT_EXTRACTION_PROMPT =
+  'Extract whether a person booked an apppoinment or not';
+
+export const DEFAULT_APPOINTMENT_JSON_EXAMPLE: Record<string, string> = {
+  appointment_booked: 'True',
+  appointment_date: '2026-05-20',
+  appointment_time: '14:30'
+};
+
+export type ExtractConversationResult = {
+  success: boolean;
+  error?: string;
+  appointment_booked?: boolean | string;
+  date?: string | null;
+  time?: string | null;
+  confidence?: number;
+  conversation_id?: string;
+  extraction_type?: string;
+  extracted_data?: Record<string, any>;
+  transcript_turns?: number;
+  duration_seconds?: number;
+  method?: string;
+};
 
 /** ElevenLabs often truncates `message` when interrupted=true; full text is in original_message. */
 function extractTurnBody(msg: any): string {
@@ -519,15 +548,21 @@ export function resolveFinalAppointmentBooked(
   ) {
     return false;
   }
-  const explicitTrue =
-    apptBookedRaw === true ||
-    apptBookedRaw === 'true' ||
-    apptBookedRaw === 'True' ||
-    apptBookedRaw === 1 ||
-    apptBookedRaw === '1';
   const hasDate = !!String(finalDate ?? '').trim();
   const hasTime = !!String(finalTime ?? '').trim();
-  return explicitTrue && hasDate && hasTime;
+  if (!hasDate || !hasTime) {
+    return false;
+  }
+  const coerced = coerceAppointmentBooked(apptBookedRaw);
+  if (coerced === true) {
+    return true;
+  }
+  // Dynamic/custom extraction schemas often return date+time without appointment_booked.
+  // If both are present and booking was not explicitly denied, treat as booked.
+  if (apptBookedRaw === undefined || apptBookedRaw === null || apptBookedRaw === '') {
+    return true;
+  }
+  return false;
 }
 
 export class AutomationService {
@@ -774,6 +809,100 @@ export class AutomationService {
   } = {} as any;
 
   /**
+   * Extract via Python service POST /api/v1/automation/extract-data (multilingual, tested).
+   * Falls back to local extractConversationData on failure.
+   */
+  async extractConversationDataViaPythonApi(
+    conversationId: string,
+    extractionType: string = 'appointment',
+    options?: { extraction_prompt?: string; json_example?: Record<string, any> }
+  ): Promise<ExtractConversationResult> {
+    const url = `${PYTHON_API_BASE_URL.replace(/\/$/, '')}/api/v1/automation/extract-data`;
+    const extraction_prompt = options?.extraction_prompt?.trim() || DEFAULT_APPOINTMENT_EXTRACTION_PROMPT;
+    const json_example = options?.json_example ?? DEFAULT_APPOINTMENT_JSON_EXAMPLE;
+
+    const body = {
+      conversation_id: conversationId,
+      extraction_type: extractionType || 'appointment',
+      extraction_prompt,
+      json_example
+    };
+
+    console.log('[Automation Service] POST Python extract-data:', url, {
+      conversation_id: conversationId,
+      extraction_type: body.extraction_type
+    });
+
+    try {
+      const response = await axios.post(url, body, {
+        headers: { accept: 'application/json', 'Content-Type': 'application/json' },
+        timeout: 120_000
+      });
+      const data = response.data || {};
+      const extracted_data: Record<string, any> = data.extracted_data || {};
+
+      const bookedRaw = extracted_data.appointment_booked ?? data.appointment_booked;
+      const dateRaw =
+        extracted_data.appointment_date ??
+        extracted_data.date ??
+        data.date ??
+        null;
+      const timeRaw =
+        extracted_data.appointment_time ??
+        extracted_data.time ??
+        data.time ??
+        null;
+
+      return {
+        success: data.success !== false,
+        conversation_id: data.conversation_id || conversationId,
+        extraction_type: data.extraction_type || extractionType,
+        extracted_data,
+        appointment_booked: bookedRaw,
+        date: dateRaw,
+        time: timeRaw,
+        confidence: extracted_data.confidence ?? data.confidence,
+        transcript_turns: data.transcript_turns,
+        duration_seconds: data.duration_seconds,
+        method: data.method || 'llm'
+      };
+    } catch (error: any) {
+      const msg =
+        error.response?.data?.error ||
+        error.response?.data?.message ||
+        error.message ||
+        'Python extract-data request failed';
+      console.warn('[Automation Service] Python extract-data failed, using local fallback:', msg);
+      throw error;
+    }
+  }
+
+  /**
+   * Appointment extraction: Python API first, then local LLM fallback.
+   */
+  async extractAppointmentForAutomation(
+    conversationId: string,
+    organizationId: string,
+    options?: { extraction_prompt?: string; json_example?: Record<string, any>; extraction_type?: string }
+  ): Promise<ExtractConversationResult> {
+    const extractionType = options?.extraction_type || 'appointment';
+    const prompt = options?.extraction_prompt?.trim() || DEFAULT_APPOINTMENT_EXTRACTION_PROMPT;
+    const jsonExample = options?.json_example ?? DEFAULT_APPOINTMENT_JSON_EXAMPLE;
+
+    try {
+      return await this.extractConversationDataViaPythonApi(conversationId, extractionType, {
+        extraction_prompt: prompt,
+        json_example: jsonExample
+      });
+    } catch {
+      return this.extractConversationData(conversationId, extractionType, organizationId, {
+        extraction_prompt: prompt,
+        json_example: jsonExample
+      });
+    }
+  }
+
+  /**
    * Extract structured data from a conversation using LLM.
    * Supports two modes:
    * 1. Dynamic: pass options.extraction_prompt + options.json_example → returns extracted_data matching json_example shape.
@@ -997,9 +1126,15 @@ Respond ONLY with valid JSON matching the above keys. No extra keys, no explanat
 
         console.log('[Automation Service] Dynamic extraction result:', { conversationId, extracted_data });
 
+        const hasDate = !!String(extracted_data.date ?? '').trim();
+        const hasTime = !!String(extracted_data.time ?? '').trim();
+        const explicitlyNotBooked =
+          extracted_data.appointment_booked === false ||
+          extracted_data.appointment_booked === 'false';
         const dynamicBookedFinal =
           extracted_data.appointment_booked === true ||
-          extracted_data.appointment_booked === 'true';
+          extracted_data.appointment_booked === 'true' ||
+          (hasDate && hasTime && !explicitlyNotBooked);
         return {
           success: true,
           conversation_id: conversationId,
