@@ -649,6 +649,39 @@ export class ElevenLabsWebhookController {
         return true;
       }
 
+      // ── Transcript: use webhook payload; fall back to a single ElevenLabs fetch ──
+      //
+      // post_call_transcription fires after ElevenLabs finishes generating the
+      // transcript, so data.transcript should always be populated. However, there
+      // is an occasional ~2–5s propagation gap where the API serves an empty result
+      // even after the webhook fires. When the webhook transcript is empty (but the
+      // call had real duration), we wait briefly and fetch once from the ElevenLabs
+      // conversation API before saving to Mongo. This protects the local-LLM fallback
+      // path in extraction which reads transcript from the DB.
+      let finalTranscript = webhookTranscript;
+      if (webhookTranscript.length === 0 && elevenLabsConvId && duration > 0) {
+        console.log(
+          `[ElevenLabs Webhook] ⚠️ Empty transcript in webhook for ${phoneNumber} – fetching from ElevenLabs in 3s`
+        );
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        try {
+          const { batchCallingService } = await import('../services/batchCalling.service');
+          const convDetail = await batchCallingService.getConversationDetail(elevenLabsConvId);
+          const fetched: any[] =
+            convDetail?.transcript?.items ||
+            convDetail?.transcript?.messages ||
+            (Array.isArray(convDetail?.transcript) ? convDetail.transcript : []);
+          if (fetched.length > 0) {
+            console.log(
+              `[ElevenLabs Webhook] ✅ Fetched ${fetched.length} transcript items from ElevenLabs API for ${phoneNumber}`
+            );
+            finalTranscript = fetched;
+          }
+          // If still empty: proceed anyway — Python extract will call ElevenLabs
+          // directly using conv_xxx and will retry on its own timeout.
+        } catch (_) { /* non-fatal, Python extract will fetch from ElevenLabs directly */ }
+      }
+
       // ── Contact info from dynamic variables (CSV columns) ─────────────────────
       const firstName =
         dynamicVars.first_name || dynamicVars.customer_first_name || '';
@@ -728,7 +761,7 @@ export class ElevenLabsWebhookController {
           { _id: existing._id },
           {
             $set: {
-              transcript: webhookTranscript,
+              transcript: finalTranscript,
               'metadata.duration_seconds': duration,
               'metadata.call_duration_secs': duration,
               'metadata.end_reason': endReason,
@@ -744,9 +777,9 @@ export class ElevenLabsWebhookController {
           conversationId: existing._id,
           type: 'message'
         });
-        if (existingMsgCount === 0 && webhookTranscript.length > 0) {
+        if (existingMsgCount === 0 && finalTranscript.length > 0) {
           await Message.insertMany(
-            this.buildMessagesFromTranscript(existing._id, webhookTranscript, startTimeUnix, batchId)
+            this.buildMessagesFromTranscript(existing._id, finalTranscript, startTimeUnix, batchId)
           );
         }
       } else {
@@ -755,7 +788,7 @@ export class ElevenLabsWebhookController {
           customerId: customer._id,
           channel: 'phone',
           status: 'closed',
-          transcript: webhookTranscript,
+          transcript: finalTranscript,
           isAiManaging: true,
           unread: false,
           metadata: {
@@ -779,9 +812,9 @@ export class ElevenLabsWebhookController {
 
         conversationMongoId = conversation._id.toString();
 
-        if (webhookTranscript.length > 0) {
+        if (finalTranscript.length > 0) {
           await Message.insertMany(
-            this.buildMessagesFromTranscript(conversation._id, webhookTranscript, startTimeUnix, batchId)
+            this.buildMessagesFromTranscript(conversation._id, finalTranscript, startTimeUnix, batchId)
           );
         }
       }
