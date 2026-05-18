@@ -539,30 +539,9 @@ export class BatchCallingController {
               })
             });
 
-            try {
-              const { enqueueBatchPoll } = await import('../queues/batchCallSync.queue');
-              const enqueued = await enqueueBatchPoll(chunk.result.id, organizationIdStr);
-              if (enqueued) {
-                console.log('[Batch Calling Controller] 🚀 Background polling started for batch:', chunk.result.id);
-              } else {
-                const { batchCallingService } = await import('../services/batchCalling.service');
-                const runSync = () => {
-                  void batchCallingService
-                    .syncBatchCallConversations(chunk.result.id, organizationIdStr)
-                    .catch((err: any) => {
-                      console.error(
-                        `[Batch Calling Controller] Sync failed for ${chunk.result.id}:`,
-                        err?.message || err
-                      );
-                    });
-                };
-                runSync();
-                setTimeout(runSync, 20_000);
-                setTimeout(runSync, 50_000);
-              }
-            } catch (queueError: any) {
-              console.warn('[Batch Calling Controller] ⚠️  Failed to enqueue batch poll:', queueError.message);
-            }
+            console.log(
+              `[Batch Calling Controller] Batch submitted (${chunk.result.id}) — completion via post_call_transcription webhooks`
+            );
           }
         } else {
           console.warn('[Batch Calling Controller] ⚠️ Could not store batch call - userId or organizationId missing');
@@ -637,9 +616,8 @@ export class BatchCallingController {
       const result = await batchCallingService.getBatchJobStatus(jobId);
 
       // Update database with latest status
-      let updatedBatchCall: any = null;
       try {
-        updatedBatchCall = await BatchCall.findOneAndUpdate(
+        await BatchCall.findOneAndUpdate(
           { batch_call_id: jobId },
           {
             $set: {
@@ -649,23 +627,11 @@ export class BatchCallingController {
               total_calls_finished: result.total_calls_finished,
               last_updated_at_unix: result.last_updated_at_unix
             }
-          },
-          { new: true }
+          }
         );
       } catch (dbError: any) {
         console.warn('[Batch Calling Controller] ⚠️ Failed to update batch call status in database:', dbError.message);
         // Don't fail the request if database update fails
-      }
-
-      // If batch call is completed and conversations haven't been synced, fetch results and create conversations
-      if (result.status === 'completed' && updatedBatchCall && !updatedBatchCall.conversations_synced) {
-        console.log('[Batch Calling Controller] 🚀 Batch call completed! Fetching results and creating conversations...');
-
-        // Process results asynchronously (don't block the response)
-        batchCallingService.syncBatchCallConversations(jobId, organizationId.toString()).catch((error: any) => {
-          console.error('[Batch Calling Controller] ❌ Failed to sync batch call conversations:', error.message);
-          // Don't throw - we don't want to fail the status request
-        });
       }
 
       res.status(200).json(result);
