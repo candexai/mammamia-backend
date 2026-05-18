@@ -154,7 +154,7 @@ export class KnowledgeBaseService {
       const [pythonResponse, ragResponse] = await Promise.allSettled([
         axios.post(pythonUrl, pythonFormData, {
           headers: pythonFormData.getHeaders(),
-          timeout: source_type === 'file' ? 300000 : 30000, // 5 minutes for file upload, 30s for others
+          timeout: 600000, // 10 minutes timeout
         }),
         ragApiPromise
       ]);
