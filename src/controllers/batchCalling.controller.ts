@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { batchCallingService } from '../services/batchCalling.service';
+import { batchCallingService, isActiveBatchStatus } from '../services/batchCalling.service';
 import mongoose from 'mongoose';
 
 const MAX_RECIPIENTS = 10000;
@@ -540,7 +540,8 @@ export class BatchCallingController {
             });
 
             console.log(
-              `[Batch Calling Controller] Batch submitted (${chunk.result.id}) — completion via post_call_transcription webhooks`
+              '[Batch Calling Controller] Batch submitted – completion handled via post_call_transcription webhooks:',
+              chunk.result.id
             );
           }
         } else {
@@ -616,8 +617,9 @@ export class BatchCallingController {
       const result = await batchCallingService.getBatchJobStatus(jobId);
 
       // Update database with latest status
+      let updatedBatchCall: any = null;
       try {
-        await BatchCall.findOneAndUpdate(
+        updatedBatchCall = await BatchCall.findOneAndUpdate(
           { batch_call_id: jobId },
           {
             $set: {
@@ -627,7 +629,8 @@ export class BatchCallingController {
               total_calls_finished: result.total_calls_finished,
               last_updated_at_unix: result.last_updated_at_unix
             }
-          }
+          },
+          { new: true }
         );
       } catch (dbError: any) {
         console.warn('[Batch Calling Controller] ⚠️ Failed to update batch call status in database:', dbError.message);
@@ -881,7 +884,10 @@ export class BatchCallingController {
   /**
    * Get all batch calls for the user's organization
    * GET /api/v1/batch-calling
-   * Syncs status from Python API for each batch call
+   *
+   * Returns MongoDB records immediately. Only in-flight batches are refreshed from
+   * the Python API (summary fields only) so listing stays fast with many completed
+   * 500-contact batches.
    */
   async getBatchCalls(req: AuthRequest, res: Response, next: NextFunction) {
     try {
@@ -908,58 +914,26 @@ export class BatchCallingController {
         .sort({ createdAt: -1 })
         .lean();
 
-      // Sync status from Python API for each batch call
-      const syncedBatchCalls = await Promise.all(
-        batchCalls.map(async (batchCall) => {
-          try {
-            // Fetch latest status from Python API
-            const latestStatus = await batchCallingService.getBatchJobStatus(batchCall.batch_call_id);
+      // Respond immediately from Mongo — never block on Python.
+      // Active-batch counts are refreshed in the background so the next
+      // frontend poll (15 s) will see updated numbers.
+      res.status(200).json({ success: true, data: batchCalls });
 
-            // Update database with latest status if it changed
-            const statusChanged =
-              batchCall.status !== latestStatus.status ||
-              batchCall.total_calls_dispatched !== latestStatus.total_calls_dispatched ||
-              batchCall.total_calls_scheduled !== latestStatus.total_calls_scheduled ||
-              batchCall.total_calls_finished !== latestStatus.total_calls_finished;
-
-            if (statusChanged) {
-              await BatchCall.updateOne(
-                { batch_call_id: batchCall.batch_call_id },
-                {
-                  $set: {
-                    status: latestStatus.status,
-                    total_calls_dispatched: latestStatus.total_calls_dispatched,
-                    total_calls_scheduled: latestStatus.total_calls_scheduled,
-                    total_calls_finished: latestStatus.total_calls_finished,
-                    last_updated_at_unix: latestStatus.last_updated_at_unix
-                  }
-                }
-              );
-
-              // Return updated data
-              return {
-                ...batchCall,
-                status: latestStatus.status,
-                total_calls_dispatched: latestStatus.total_calls_dispatched,
-                total_calls_scheduled: latestStatus.total_calls_scheduled,
-                total_calls_finished: latestStatus.total_calls_finished,
-                last_updated_at_unix: latestStatus.last_updated_at_unix
-              };
-            }
-
-            return batchCall;
-          } catch (error: any) {
-            // If Python API call fails, return the database record as-is
-            console.warn(`[Batch Calling Controller] ⚠️ Failed to sync status for batch call ${batchCall.batch_call_id}:`, error.message);
-            return batchCall;
-          }
-        })
-      );
-
-      res.status(200).json({
-        success: true,
-        data: syncedBatchCalls
-      });
+      // Background refresh: update Mongo for any in-flight batches.
+      const activeBatches = batchCalls.filter((b) => isActiveBatchStatus(b.status));
+      if (activeBatches.length > 0) {
+        setImmediate(() => {
+          void Promise.all(
+            activeBatches.map(async (b) => {
+              try {
+                await batchCallingService.refreshBatchSummaryInDb(b.batch_call_id);
+              } catch {
+                // best-effort; next poll will retry
+              }
+            })
+          );
+        });
+      }
     } catch (error) {
       next(error);
     }
@@ -1154,12 +1128,84 @@ export class BatchCallingController {
   }
 
   /**
-   * Get complete per-contact batch details
-   * GET /api/v1/batch-calling/:jobId/details
+   * Lazy-load transcript for one batch contact (from Mongo messages).
+   * GET /api/v1/batch-calling/:jobId/contacts/:conversationId/transcript
+   */
+  async getBatchContactTranscript(req: AuthRequest, res: Response, next: NextFunction) {
+    try {
+      const { jobId, conversationId } = req.params;
+      if (!jobId || !conversationId) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'MISSING_PARAMS', message: 'Job ID and conversation ID are required' }
+        });
+      }
+
+      const organizationId = await resolveOrganizationObjectId(req);
+      if (!organizationId) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized',
+          detail: 'Organization ID or User ID not found'
+        });
+      }
+
+      const Conversation = (await import('../models/Conversation')).default;
+      const Message = (await import('../models/Message')).default;
+
+      const conversation = await Conversation.findOne({
+        organizationId,
+        channel: 'phone',
+        'metadata.batch_call_id': jobId,
+        'metadata.conversation_id': conversationId
+      })
+        .select('_id')
+        .lean();
+
+      if (!conversation) {
+        return res.status(404).json({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'Conversation not found for this batch contact' }
+        });
+      }
+
+      const messages = await Message.find({
+        conversationId: conversation._id,
+        type: 'message'
+      })
+        .sort({ timestamp: 1 })
+        .select('sender text timestamp')
+        .lean();
+
+      const transcript = messages.map((m: any) => ({
+        role: m.sender === 'customer' ? 'user' : 'agent',
+        message: m.text,
+        timestamp: m.timestamp
+      }));
+
+      return res.status(200).json({
+        success: true,
+        data: { conversation_id: conversationId, transcript }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get paginated per-contact batch details (summary only; transcripts loaded separately).
+   * GET /api/v1/batch-calling/:jobId/details?page=1&page_size=50
    */
   async getBatchJobDetails(req: AuthRequest, res: Response, next: NextFunction) {
     try {
       const { jobId } = req.params;
+      const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+      const pageSize = Math.min(
+        100,
+        Math.max(1, parseInt(String(req.query.page_size || '50'), 10) || 50)
+      );
+      const includeTranscript = req.query.include_transcript === 'true';
+
       if (!jobId) {
         return res.status(400).json({
           success: false,
@@ -1201,23 +1247,31 @@ export class BatchCallingController {
         });
       }
 
-      const [
-        statusResult,
-        callsResult,
-        resultsResult,
-        failedCallsResult,
-        busyCallsResult,
-        noAnswerCallsResult,
-        voicemailCallsResult
-      ] = await Promise.all([
-        batchCallingService.getBatchJobStatus(jobId).catch(() => null),
-        batchCallingService.getBatchJobCalls(jobId, { page_size: 100 }).catch(() => ({ calls: [] })),
-        batchCallingService.getBatchJobResults(jobId, true).catch(() => null),
-        batchCallingService.getBatchJobCalls(jobId, { status: 'failed', page_size: 100 }).catch(() => ({ calls: [] })),
-        batchCallingService.getBatchJobCalls(jobId, { status: 'busy', page_size: 100 }).catch(() => ({ calls: [] })),
-        batchCallingService.getBatchJobCalls(jobId, { status: 'no_answer', page_size: 100 }).catch(() => ({ calls: [] })),
-        batchCallingService.getBatchJobCalls(jobId, { status: 'voicemail', page_size: 100 }).catch(() => ({ calls: [] }))
+      // Primary source: Mongo conversations (synced by webhook, always fast).
+      // Python status is only fetched for in-flight batches AND with a short timeout
+      // so a slow Python never blocks the response.
+      const batchIsActive = isActiveBatchStatus(batchCall.status);
+
+      const pythonStatusPromise = batchIsActive
+        ? batchCallingService.getBatchJobStatus(jobId)
+            .then((r) => r)
+            .catch(() => null)
+        : Promise.resolve(null);
+
+      // Race Python against a 5-second wall clock so a slow comm-api never hangs the page.
+      const statusResult: any = await Promise.race([
+        pythonStatusPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))
       ]);
+
+      const resultsResult = includeTranscript && batchIsActive
+        ? await batchCallingService.getBatchJobResults(jobId, true).catch(() => null)
+        : null;
+      const callsResult = { calls: [] as any[] };
+      const failedCallsResult = { calls: [] as any[] };
+      const busyCallsResult = { calls: [] as any[] };
+      const noAnswerCallsResult = { calls: [] as any[] };
+      const voicemailCallsResult = { calls: [] as any[] };
 
       const extractArray = (input: any): any[] => {
         if (Array.isArray(input)) return input;
@@ -1445,6 +1499,28 @@ export class BatchCallingController {
       };
 
       const recipientRows = extractArray(statusResult?.recipients || statusResult);
+
+      const batchStatusLowerEarly = String(statusResult?.status || '').toLowerCase();
+      const scheduledEarly = Number(statusResult?.total_calls_scheduled ?? 0);
+      const finishedEarly = Number(statusResult?.total_calls_finished ?? 0);
+      const batchStillRunningEarly =
+        batchStatusLowerEarly === 'pending' ||
+        batchStatusLowerEarly === 'in_progress' ||
+        batchStatusLowerEarly === 'running' ||
+        batchStatusLowerEarly === 'queued' ||
+        batchStatusLowerEarly === 'processing';
+      const batchExplicitlyCompleteEarly =
+        batchStatusLowerEarly === 'completed' ||
+        batchStatusLowerEarly === 'done' ||
+        batchStatusLowerEarly === 'finished';
+      const batchNotDoneEarly =
+        !batchExplicitlyCompleteEarly &&
+        (batchStillRunningEarly ||
+          (statusResult != null &&
+            scheduledEarly > 0 &&
+            Number.isFinite(finishedEarly) &&
+            finishedEarly < scheduledEarly));
+
       const dedupeRows = (rows: any[]): any[] => {
         const seen = new Set<string>();
         const out: any[] = [];
@@ -1471,16 +1547,45 @@ export class BatchCallingController {
       ]);
       const resultRows = extractArray(resultsResult);
 
-      // Live conversation details help resolve final status when batch endpoint still says "initiated".
-      const liveConversationIds = Array.from(
-        new Set(
-          [
-            ...recipientRows.map((r: any) => r?.conversation_id).filter(Boolean),
-            ...callRows.map((r: any) => r?.conversation_id || r?.conversationId).filter(Boolean),
-            ...resultRows.map((r: any) => r?.conversation_id || r?.conversationId || r?.id).filter(Boolean)
-          ].map(String)
-        )
-      ).slice(0, 150);
+      const recipientByPhone = new Map<string, any>();
+      for (const r of recipientRows) {
+        const key = normalizePhoneForCompare(r?.phone_number || r?.phone);
+        if (key && !recipientByPhone.has(key)) recipientByPhone.set(key, r);
+      }
+      const resultByPhone = new Map<string, any>();
+      for (const r of resultRows) {
+        const key = normalizePhoneForCompare(r?.phone_number || r?.phone);
+        if (key && !resultByPhone.has(key)) resultByPhone.set(key, r);
+      }
+
+      // Live conversation fetches are expensive — only for in-flight recipients while batch is running.
+      const terminalRecipientStatuses = new Set([
+        'completed',
+        'complete',
+        'done',
+        'finished',
+        'success',
+        'successful',
+        'failed',
+        'busy',
+        'no_answer',
+        'no-answer',
+        'voicemail',
+        'cancelled',
+        'canceled'
+      ]);
+      const liveConversationIds = batchNotDoneEarly
+        ? Array.from(
+            new Set(
+              recipientRows
+                .filter((r: any) => {
+                  const s = String(r?.status || '').toLowerCase().trim();
+                  return r?.conversation_id && !terminalRecipientStatuses.has(s);
+                })
+                .map((r: any) => String(r.conversation_id))
+            )
+          ).slice(0, 25)
+        : [];
 
       const liveConversationMap = new Map<string, any>();
       if (liveConversationIds.length > 0) {
@@ -1520,7 +1625,9 @@ export class BatchCallingController {
         organizationId: orgObjectId,
         channel: 'phone',
         'metadata.batch_call_id': jobId
-      }).lean();
+      })
+        .select('_id customerId status channel metadata createdAt updatedAt')
+        .lean();
 
       const conversationIds = dbConversations.map((c: any) => c._id);
       const [messageCounts, customers] = await Promise.all([
@@ -1548,12 +1655,26 @@ export class BatchCallingController {
         if (convId && !dbByConversationId.has(convId)) dbByConversationId.set(convId, c);
       }
 
-      const allPhones = new Set<string>();
+      const phoneOrdered: string[] = [];
+      const seenPhoneKeys = new Set<string>();
+      for (const r of recipientRows) {
+        const raw = r?.phone_number || r?.phone;
+        if (!raw) continue;
+        const key = normalizePhoneForCompare(raw);
+        if (!key || seenPhoneKeys.has(key)) continue;
+        seenPhoneKeys.add(key);
+        phoneOrdered.push(String(raw));
+      }
+      for (const c of dbConversations) {
+        const raw = c?.metadata?.phone_number;
+        if (!raw) continue;
+        const key = normalizePhoneForCompare(raw);
+        if (!key || seenPhoneKeys.has(key)) continue;
+        seenPhoneKeys.add(key);
+        phoneOrdered.push(String(raw));
+      }
+
       const allConversationIds = new Set<string>();
-      recipientRows.forEach((r: any) => r?.phone_number && allPhones.add(r.phone_number));
-      callRows.forEach((r: any) => r?.phone_number && allPhones.add(r.phone_number));
-      resultRows.forEach((r: any) => (r?.phone_number || r?.phone) && allPhones.add(r.phone_number || r.phone));
-      dbConversations.forEach((c: any) => c?.metadata?.phone_number && allPhones.add(c.metadata.phone_number));
       recipientRows.forEach((r: any) => r?.conversation_id && allConversationIds.add(r.conversation_id));
       callRows.forEach((r: any) => (r?.conversation_id || r?.conversationId) && allConversationIds.add(r.conversation_id || r.conversationId));
       resultRows.forEach((r: any) => (r?.conversation_id || r?.conversationId || r?.id) && allConversationIds.add(r.conversation_id || r.conversationId || r.id));
@@ -1758,27 +1879,26 @@ export class BatchCallingController {
         return { status: raw || 'pending', failed_reason: '', end_reason: '' };
       };
 
-      const contacts = [...allPhones].map((phone) => {
+      const contacts = phoneOrdered.map((phone) => {
         const normalizedPhone = normalizePhoneForCompare(phone);
-        const statusRow = recipientRows.find((r: any) => normalizePhoneForCompare(r?.phone_number) === normalizedPhone) || byPhone.get(normalizedPhone) || {};
+        const statusRow = recipientByPhone.get(normalizedPhone) || byPhone.get(normalizedPhone) || {};
         const statusRecipientId = statusRow?.id ? String(statusRow.id) : '';
         const callRow =
-          callRows.find((r: any) => normalizePhoneForCompare(r?.phone_number || r?.phone) === normalizedPhone) ||
-          (statusRecipientId ? byRecipientId.get(statusRecipientId) : null) ||
-          {};
+          (statusRecipientId ? byRecipientId.get(statusRecipientId) : null) || {};
         const resultRow =
-          resultRows.find((r: any) => normalizePhoneForCompare(r?.phone_number || r?.phone) === normalizedPhone) ||
+          (includeTranscript ? resultByPhone.get(normalizedPhone) : null) ||
           (statusRecipientId ? byRecipientId.get(statusRecipientId) : null) ||
           {};
         const conversationId = statusRow?.conversation_id || callRow?.conversation_id || callRow?.conversationId || resultRow?.conversation_id || resultRow?.conversationId || resultRow?.id;
         const liveConversation = conversationId ? liveConversationMap.get(String(conversationId)) : null;
         const dbConversation = dbByPhone.get(phone) || (conversationId ? dbByConversationId.get(conversationId) : null);
         const customer = dbConversation?.customerId ? customerMap.get(String(dbConversation.customerId)) : null;
-        const transcript =
-          resultRow?.transcript ||
-          callRow?.transcript ||
-          dbConversation?.transcript ||
-          null;
+        const transcript = includeTranscript
+          ? resultRow?.transcript ||
+            callRow?.transcript ||
+            dbConversation?.transcript ||
+            null
+          : undefined;
 
         const dynamicVars = statusRow?.conversation_initiation_client_data?.dynamic_variables || {};
         const displayName = statusRow?.name || callRow?.name || resultRow?.name || dynamicVars.name || dynamicVars.customer_name || customer?.name || 'Unknown';
@@ -1910,7 +2030,9 @@ export class BatchCallingController {
             '';
           const durationSecondsRow =
             row?.metadata?.call_duration_secs || row?.call_duration_secs || dbConversation?.metadata?.duration_seconds || 0;
-          const transcriptRow = row?.transcript || dbConversation?.transcript || null;
+          const transcriptRow = includeTranscript
+            ? row?.transcript || dbConversation?.transcript || null
+            : undefined;
           const msgRow = dbConversation ? messageCountMap.get(String(dbConversation._id)) || 0 : 0;
           const hasTranscriptRow = (() => {
             const t = transcriptRow;
@@ -1972,6 +2094,12 @@ export class BatchCallingController {
           return (a.name || '').localeCompare(b.name || '');
         });
 
+      const totalContacts = mergedContacts.length;
+      const totalPages = Math.max(1, Math.ceil(totalContacts / pageSize));
+      const safePage = Math.min(page, totalPages);
+      const startIndex = (safePage - 1) * pageSize;
+      const pagedContacts = mergedContacts.slice(startIndex, startIndex + pageSize);
+
       res.status(200).json({
         success: true,
         data: {
@@ -1982,7 +2110,13 @@ export class BatchCallingController {
             live_total_calls_scheduled: statusResult?.total_calls_scheduled ?? batchCall.total_calls_scheduled,
             live_total_calls_finished: statusResult?.total_calls_finished ?? batchCall.total_calls_finished
           },
-          contacts: mergedContacts
+          contacts: pagedContacts,
+          pagination: {
+            page: safePage,
+            page_size: pageSize,
+            total_contacts: totalContacts,
+            total_pages: totalPages
+          }
         }
       });
     } catch (error) {

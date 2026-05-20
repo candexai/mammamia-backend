@@ -72,6 +72,22 @@ export interface BatchJobCallsResponse {
   cursor?: string;
 }
 
+/** Batch job statuses that may still change — only these are refreshed on list load. */
+export const ACTIVE_BATCH_STATUSES = new Set([
+  'pending',
+  'scheduled',
+  'running',
+  'in_progress',
+  'retrying',
+  'queued',
+  'processing',
+  'initiated'
+]);
+
+export function isActiveBatchStatus(status: string | undefined): boolean {
+  return ACTIVE_BATCH_STATUSES.has(String(status || '').toLowerCase().trim());
+}
+
 export class BatchCallingService {
   private syncLocks = new Set<string>();
 
@@ -157,7 +173,7 @@ export class BatchCallingService {
    * Get batch job status
    * Calls Python /api/v1/batch-calling/{job_id} endpoint
    */
-  async getBatchJobStatus(jobId: string): Promise<BatchCallResponse> {
+  async getBatchJobStatus(jobId: string, timeoutMs = 10000): Promise<BatchCallResponse> {
     if (isCommApiCircuitOpen()) {
       throw new AppError(
         503,
@@ -169,7 +185,7 @@ export class BatchCallingService {
     try {
       const response = await axios.get<BatchCallResponse>(
         `${COMM_API_URL}/api/v1/batch-calling/${jobId}`,
-        { timeout: 30000, headers: { 'Content-Type': 'application/json' } }
+        { timeout: timeoutMs, headers: { 'Content-Type': 'application/json' } }
       );
       assertCommApiResponseData(response.data, `batch status ${jobId}`);
       recordCommApiSuccess();
@@ -186,6 +202,40 @@ export class BatchCallingService {
         message
       );
     }
+  }
+
+  /**
+   * Pull latest summary counters from the Python API and persist to Mongo.
+   * Used for list refresh on in-flight batches only (not full recipient sync).
+   */
+  async refreshBatchSummaryInDb(batchCallId: string, timeoutMs = 20000): Promise<{
+    status: string;
+    total_calls_dispatched: number;
+    total_calls_scheduled: number;
+    total_calls_finished: number;
+    last_updated_at_unix: number;
+  } | null> {
+    const latestStatus = await this.getBatchJobStatus(batchCallId, timeoutMs);
+    const BatchCall = (await import('../models/BatchCall')).default;
+    await BatchCall.updateOne(
+      { batch_call_id: batchCallId },
+      {
+        $set: {
+          status: latestStatus.status,
+          total_calls_dispatched: latestStatus.total_calls_dispatched,
+          total_calls_scheduled: latestStatus.total_calls_scheduled,
+          total_calls_finished: latestStatus.total_calls_finished,
+          last_updated_at_unix: latestStatus.last_updated_at_unix
+        }
+      }
+    );
+    return {
+      status: latestStatus.status,
+      total_calls_dispatched: latestStatus.total_calls_dispatched,
+      total_calls_scheduled: latestStatus.total_calls_scheduled,
+      total_calls_finished: latestStatus.total_calls_finished,
+      last_updated_at_unix: latestStatus.last_updated_at_unix
+    };
   }
 
   /**
