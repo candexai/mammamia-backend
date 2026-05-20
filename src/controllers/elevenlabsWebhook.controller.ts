@@ -71,8 +71,7 @@ export class ElevenLabsWebhookController {
         }
       }
 
-      // For outbound (batch) calls – trigger an immediate sync so the transcript is
-      // picked up without waiting for the next 30s poll tick.
+      // For outbound (batch) calls – process transcript via webhook fast path only.
       if (body?.type === 'post_call_transcription') {
         const direction = body?.data?.metadata?.phone_call?.direction;
         if (direction === 'outbound') {
@@ -482,6 +481,8 @@ export class ElevenLabsWebhookController {
    * No poll/sync fallback — use POST /batch-calling/:jobId/sync for manual recovery.
    *
    * Fast path when data.status === "done" and data.metadata.batch_call.batch_call_id is present.
+   * ElevenLabs sets status="done" only after transcript generation is complete.
+   * If processing fails, use POST /batch-calling/:jobId/sync — no background poll/sync fallback.
    */
   private async processBatchCallWebhook(webhookBody: any) {
     this.logBatchPostCallTranscriptionWebhook(webhookBody);
