@@ -1,6 +1,10 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { batchCallingService, isActiveBatchStatus } from '../services/batchCalling.service';
+import {
+  batchCallingService,
+  isActiveBatchStatus,
+  BATCH_COMM_API_TIMEOUT_MS
+} from '../services/batchCalling.service';
 import mongoose from 'mongoose';
 
 const MAX_RECIPIENTS = 10000;
@@ -1248,20 +1252,20 @@ export class BatchCallingController {
       }
 
       // Primary source: Mongo conversations (synced by webhook, always fast).
-      // Python status is only fetched for in-flight batches AND with a short timeout
-      // so a slow Python never blocks the response.
+      // Python status only for in-flight batches, capped at BATCH_COMM_API_TIMEOUT_MS.
       const batchIsActive = isActiveBatchStatus(batchCall.status);
 
       const pythonStatusPromise = batchIsActive
-        ? batchCallingService.getBatchJobStatus(jobId)
+        ? batchCallingService.getBatchJobStatus(jobId, BATCH_COMM_API_TIMEOUT_MS)
             .then((r) => r)
             .catch(() => null)
         : Promise.resolve(null);
 
-      // Race Python against a 5-second wall clock so a slow comm-api never hangs the page.
       const statusResult: any = await Promise.race([
         pythonStatusPromise,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))
+        new Promise<null>((resolve) =>
+          setTimeout(() => resolve(null), BATCH_COMM_API_TIMEOUT_MS)
+        )
       ]);
 
       const resultsResult = includeTranscript && batchIsActive
@@ -1985,7 +1989,7 @@ export class BatchCallingController {
           end_reason: outcome.end_reason,
           failed_reason: outcome.failed_reason,
           summary,
-          transcript,
+          ...(includeTranscript ? { transcript } : {}),
           metadata: {
             sip_call_sid: resultRow?.metadata?.call_sid || callRow?.call_sid || null,
             recording_url: resultRow?.recording_url || resultRow?.audio_url || dbConversation?.metadata?.recording_url || dbConversation?.metadata?.audio_url || null,
@@ -2067,7 +2071,7 @@ export class BatchCallingController {
             end_reason: outcomeRow.end_reason,
             failed_reason: outcomeRow.failed_reason,
             summary: row?.analysis?.summary || row?.summary || '',
-            transcript: transcriptRow,
+            ...(includeTranscript ? { transcript: transcriptRow } : {}),
             metadata: {
               sip_call_sid: row?.metadata?.call_sid || row?.call_sid || null,
               recording_url: row?.recording_url || row?.audio_url || dbConversation?.metadata?.recording_url || dbConversation?.metadata?.audio_url || null,

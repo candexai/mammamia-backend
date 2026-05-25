@@ -1,5 +1,5 @@
 import Bull from 'bull';
-import { batchCallingService } from '../services/batchCalling.service';
+import { batchCallingService, BATCH_COMM_API_TIMEOUT_MS } from '../services/batchCalling.service';
 import { isRedisAvailable, bullCreateClient } from '../config/redis';
 import mongoose from 'mongoose';
 
@@ -288,7 +288,7 @@ export const enqueueBatchCall = async (data: {
         type: 'exponential',
         delay: 30000 // 30 seconds between retries
       },
-      timeout: 600000 // 10 minutes timeout for large batches
+      timeout: BATCH_COMM_API_TIMEOUT_MS
     });
 
     console.log('[Batch Call Queue] ✅ Batch call job enqueued:', job.id);
