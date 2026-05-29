@@ -122,4 +122,10 @@ ConversationSchema.index({ organizationId: 1, status: 1, updatedAt: -1 });
 ConversationSchema.index({ organizationId: 1, channel: 1, updatedAt: -1 });
 ConversationSchema.index({ organizationId: 1, assignedOperatorId: 1, updatedAt: -1 });
 
+// Atlas Performance Advisor — slow query fixes
+ConversationSchema.index({ organizationId: 1, channel: 1, 'metadata.batch_call_id': 1 });
+ConversationSchema.index({ organizationId: 1, 'metadata.conversation_id': 1 });
+ConversationSchema.index({ 'metadata.conversation_id': 1 }, { sparse: true });
+ConversationSchema.index({ customerId: 1, channel: 1 });
+
 export default mongoose.model<IConversation>('Conversation', ConversationSchema);

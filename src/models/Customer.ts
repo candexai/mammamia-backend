@@ -62,6 +62,12 @@ CustomerSchema.index({ email: 1 });
 CustomerSchema.index({ phone: 1 });
 CustomerSchema.index({ name: 'text' });
 
+// Atlas Performance Advisor — slow query fixes
+CustomerSchema.index({ organizationId: 1, phone: 1 });
+CustomerSchema.index({ organizationId: 1, email: 1 });
+CustomerSchema.index({ organizationId: 1, createdAt: -1 });
+CustomerSchema.index({ organizationId: 1, name: 1 });
+
 // Virtual field for list memberships
 CustomerSchema.virtual('listMemberships', {
   ref: 'ContactListMember',
