@@ -15,7 +15,7 @@ import Plan from '../models/Plan';
 
 const ADMIN_DASHBOARD_CACHE_TTL_SEC = 300;
 const ADMIN_DASHBOARD_CACHE_KEY = 'admin:dashboard:counts:v1';
-const ADMIN_USAGE_CACHE_KEY = 'admin:dashboard:usage:v1';
+const ADMIN_USAGE_CACHE_KEY = 'admin:dashboard:usage:v2';
 
 const localAdminCache = new Map<string, { value: any; expiresAt: number }>();
 

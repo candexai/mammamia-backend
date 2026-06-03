@@ -469,45 +469,34 @@ export class UsageTrackerService {
   }
 
   /**
-   * Platform-wide call minutes (all phone conversations, all orgs).
-   * Uses denormalized callDurationSeconds — same logic as per-org calculateCallMinutes.
+   * Platform-wide call minutes for admin dashboard.
+   * Matches IslandAI billing script: conversations with transcript, sum metadata.duration_seconds.
    */
   async calculatePlatformCallMinutes(): Promise<number> {
     try {
       const result = await Conversation.aggregate([
-        { $match: { channel: 'phone' } },
         {
-          $project: {
-            durationSeconds: {
-              $cond: {
-                if: { $and: [{ $gt: ['$callDurationSeconds', 0] }, { $lte: ['$callDurationSeconds', 7200] }] },
-                then: '$callDurationSeconds',
-                else: {
-                  $cond: {
-                    if: {
-                      $and: [
-                        { $gt: [{ $subtract: ['$updatedAt', '$createdAt'] }, 0] },
-                        { $lte: [{ $subtract: ['$updatedAt', '$createdAt'] }, 7200000] }
-                      ]
-                    },
-                    then: { $divide: [{ $subtract: ['$updatedAt', '$createdAt'] }, 1000] },
-                    else: 0
-                  }
-                }
-              }
-            }
+          $match: {
+            transcript: { $ne: null, $exists: true }
           }
         },
         {
           $group: {
             _id: null,
-            totalSeconds: { $sum: '$durationSeconds' }
+            totalSeconds: { $sum: { $ifNull: ['$metadata.duration_seconds', 0] } },
+            documentCount: { $sum: 1 }
           }
         }
       ]);
 
       if (!result.length) return 0;
-      return Math.ceil(result[0].totalSeconds / 60);
+
+      const totalSeconds = result[0].totalSeconds || 0;
+      const minutes = totalSeconds / 60;
+      logger.info(
+        `[Usage Tracker] Platform call minutes: ${minutes.toFixed(2)} from ${result[0].documentCount} transcript conversations`
+      );
+      return Math.round(minutes * 100) / 100;
     } catch (error: any) {
       logger.error('[Usage Tracker] Error calculating platform call minutes:', error.message);
       return 0;
