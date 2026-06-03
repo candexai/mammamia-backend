@@ -16,8 +16,17 @@ export class AdminController {
    */
   getDashboardMetrics = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
-      const metrics = await this.adminService.getDashboardMetrics();
-      res.json(successResponse(metrics));
+      const counts = await this.adminService.getDashboardCounts();
+      res.json(successResponse(counts));
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  getDashboardUsage = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const usage = await this.adminService.getDashboardUsage();
+      res.json(successResponse(usage));
     } catch (error) {
       next(error);
     }

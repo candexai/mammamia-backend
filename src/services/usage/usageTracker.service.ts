@@ -469,6 +469,87 @@ export class UsageTrackerService {
   }
 
   /**
+   * Platform-wide call minutes (all phone conversations, all orgs).
+   * Uses denormalized callDurationSeconds — same logic as per-org calculateCallMinutes.
+   */
+  async calculatePlatformCallMinutes(): Promise<number> {
+    try {
+      const result = await Conversation.aggregate([
+        { $match: { channel: 'phone' } },
+        {
+          $project: {
+            durationSeconds: {
+              $cond: {
+                if: { $and: [{ $gt: ['$callDurationSeconds', 0] }, { $lte: ['$callDurationSeconds', 7200] }] },
+                then: '$callDurationSeconds',
+                else: {
+                  $cond: {
+                    if: {
+                      $and: [
+                        { $gt: [{ $subtract: ['$updatedAt', '$createdAt'] }, 0] },
+                        { $lte: [{ $subtract: ['$updatedAt', '$createdAt'] }, 7200000] }
+                      ]
+                    },
+                    then: { $divide: [{ $subtract: ['$updatedAt', '$createdAt'] }, 1000] },
+                    else: 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalSeconds: { $sum: '$durationSeconds' }
+          }
+        }
+      ]);
+
+      if (!result.length) return 0;
+      return Math.ceil(result[0].totalSeconds / 60);
+    } catch (error: any) {
+      logger.error('[Usage Tracker] Error calculating platform call minutes:', error.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Platform-wide completed chat conversations (customer + ai message in same thread).
+   * Indexed on { type, sender, conversationId } for the $match + $group path.
+   */
+  async calculatePlatformChatConversations(): Promise<number> {
+    try {
+      const result = await Message.aggregate([
+        { $match: { type: 'message', sender: { $in: ['customer', 'ai'] } } },
+        {
+          $group: {
+            _id: '$conversationId',
+            hasCustomer: {
+              $max: { $cond: [{ $eq: ['$sender', 'customer'] }, 1, 0] }
+            },
+            hasAi: {
+              $max: { $cond: [{ $eq: ['$sender', 'ai'] }, 1, 0] }
+            }
+          }
+        },
+        {
+          $match: {
+            hasCustomer: 1,
+            hasAi: 1
+          }
+        },
+        { $count: 'total' }
+      ]);
+
+      return result[0]?.total || 0;
+    } catch (error: any) {
+      logger.error('[Usage Tracker] Error calculating platform chat conversations:', error.message);
+      return 0;
+    }
+  }
+
+  /**
    * Check if organization is "locked" due to limit exhaustion.
    * Pass `precomputedUsage` to skip a redundant getOrganizationUsage call.
    */

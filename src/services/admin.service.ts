@@ -7,21 +7,58 @@ import SocialIntegration from '../models/SocialIntegration';
 import Settings from '../models/Settings';
 import Profile, { IProfile } from '../models/Profile';
 import Conversation from '../models/Conversation';
-import Message from '../models/Message';
-import { profileService } from './profile.service';
 import { logger } from '../utils/logger.util';
 import { analyticsService } from './analytics/analytics.service';
 import { usageTrackerService } from './usage/usageTracker.service';
 import mongoose from 'mongoose';
 import Plan from '../models/Plan';
 
+const ADMIN_DASHBOARD_CACHE_TTL_SEC = 300;
+const ADMIN_DASHBOARD_CACHE_KEY = 'admin:dashboard:counts:v1';
+const ADMIN_USAGE_CACHE_KEY = 'admin:dashboard:usage:v1';
+
+const localAdminCache = new Map<string, { value: any; expiresAt: number }>();
+
+function getLocalCache(key: string): any | null {
+  const entry = localAdminCache.get(key);
+  if (entry && entry.expiresAt > Date.now()) return entry.value;
+  if (entry) localAdminCache.delete(key);
+  return null;
+}
+
+function setLocalCache(key: string, value: any, ttlSec = ADMIN_DASHBOARD_CACHE_TTL_SEC): void {
+  localAdminCache.set(key, { value, expiresAt: Date.now() + ttlSec * 1000 });
+}
+
+async function redisGet(key: string): Promise<any | null> {
+  try {
+    const { default: redisClient, isRedisAvailable } = await import('../config/redis');
+    if (isRedisAvailable()) {
+      const raw = await redisClient.get(key);
+      if (raw) return JSON.parse(raw);
+    }
+  } catch (_) { /* fall through */ }
+  return null;
+}
+
+async function redisSet(key: string, value: any, ttlSec = ADMIN_DASHBOARD_CACHE_TTL_SEC): Promise<void> {
+  try {
+    const { default: redisClient, isRedisAvailable } = await import('../config/redis');
+    if (isRedisAvailable()) {
+      await redisClient.setEx(key, ttlSec, JSON.stringify(value));
+    }
+  } catch (_) { /* non-fatal */ }
+}
 
 export class AdminService {
   /**
-   * Get dashboard metrics (platform-wide, all-time)
+   * Fast dashboard counts — countDocuments only, no usage aggregations.
    */
-  async getDashboardMetrics() {
+  async getDashboardCounts() {
     try {
+      const cached = (await redisGet(ADMIN_DASHBOARD_CACHE_KEY)) ?? getLocalCache(ADMIN_DASHBOARD_CACHE_KEY);
+      if (cached) return cached;
+
       const [
         totalOrganizations,
         activeOrganizations,
@@ -34,8 +71,7 @@ export class AdminService {
         whatsappIntegrations,
         instagramIntegrations,
         facebookIntegrations,
-        ecommerceIntegrations,
-        platformMetrics
+        ecommerceIntegrations
       ] = await Promise.all([
         Organization.countDocuments({ status: { $ne: 'deleted' } }).lean(),
         Organization.countDocuments({ status: 'active' }).lean(),
@@ -48,11 +84,10 @@ export class AdminService {
         SocialIntegration.countDocuments({ platform: 'whatsapp', status: 'connected' }).lean(),
         SocialIntegration.countDocuments({ platform: 'instagram', status: 'connected' }).lean(),
         SocialIntegration.countDocuments({ platform: 'facebook', status: 'connected' }).lean(),
-        Settings.countDocuments({ 'ecommerceIntegration.platform': { $exists: true, $ne: null } }).lean(),
-        analyticsService.getSimpleMetrics()
+        Settings.countDocuments({ 'ecommerceIntegration.platform': { $exists: true, $ne: null } }).lean()
       ]);
 
-      return {
+      const result = {
         totalOrganizations,
         activeOrganizations,
         totalUsers,
@@ -64,9 +99,97 @@ export class AdminService {
         whatsappIntegrations,
         instagramIntegrations,
         facebookIntegrations,
-        ecommerceIntegrations,
-        totalCallMinutes: platformMetrics.callMinutes,
-        totalChatConversations: platformMetrics.totalConversations
+        ecommerceIntegrations
+      };
+
+      await redisSet(ADMIN_DASHBOARD_CACHE_KEY, result);
+      setLocalCache(ADMIN_DASHBOARD_CACHE_KEY, result);
+      return result;
+    } catch (error: any) {
+      logger.error('Failed to get dashboard counts', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Slow usage totals for admin dashboard cards (call minutes + chat conversations).
+   */
+  async getDashboardUsage() {
+    try {
+      const cached = (await redisGet(ADMIN_USAGE_CACHE_KEY)) ?? getLocalCache(ADMIN_USAGE_CACHE_KEY);
+      if (cached) return cached;
+
+      const [callMinutes, chatConversations] = await Promise.all([
+        usageTrackerService.calculatePlatformCallMinutes(),
+        usageTrackerService.calculatePlatformChatConversations()
+      ]);
+
+      const result = { callMinutes, chatConversations };
+      await redisSet(ADMIN_USAGE_CACHE_KEY, result);
+      setLocalCache(ADMIN_USAGE_CACHE_KEY, result);
+      return result;
+    } catch (error: any) {
+      logger.error('Failed to get dashboard usage', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Pre-warm usage cache on server start so first admin visit is fast.
+   */
+  async warmDashboardUsageCache(): Promise<void> {
+    try {
+      const existing = await redisGet(ADMIN_USAGE_CACHE_KEY);
+      if (existing) {
+        logger.info('[Admin] Dashboard usage cache already warm');
+        return;
+      }
+      await this.getDashboardUsage();
+      logger.info('[Admin] Dashboard usage cache warmed');
+    } catch (error: any) {
+      logger.warn('[Admin] Failed to warm dashboard usage cache', { error: error.message });
+    }
+  }
+
+  /**
+   * Platform usage totals for analytics (date-range aware). Not used by dashboard counts.
+   */
+  async getPlatformUsageTotals(dateRange?: { from?: Date; to?: Date }) {
+    const fromKey = dateRange?.from?.toISOString() ?? 'all';
+    const toKey = dateRange?.to?.toISOString() ?? 'all';
+    const cacheKey = `admin:platform:usage:${fromKey}:${toKey}`;
+
+    const cached = (await redisGet(cacheKey)) ?? getLocalCache(cacheKey);
+    if (cached) return cached;
+
+    const dr = dateRange?.from || dateRange?.to
+      ? { dateFrom: dateRange.from, dateTo: dateRange.to }
+      : undefined;
+    const metrics = await analyticsService.getSimpleMetrics(undefined, undefined, dr);
+    const result = {
+      callMinutes: metrics.callMinutes,
+      chatConversations: metrics.totalConversations
+    };
+
+    await redisSet(cacheKey, result);
+    setLocalCache(cacheKey, result);
+    return result;
+  }
+
+  /**
+   * @deprecated Use getDashboardCounts + getDashboardUsage. Kept for backward compatibility.
+   */
+  async getDashboardMetrics() {
+    try {
+      const [counts, usage] = await Promise.all([
+        this.getDashboardCounts(),
+        this.getDashboardUsage()
+      ]);
+
+      return {
+        ...counts,
+        totalCallMinutes: usage.callMinutes,
+        totalChatConversations: usage.chatConversations
       };
     } catch (error: any) {
       logger.error('Failed to get dashboard metrics', { error: error.message });

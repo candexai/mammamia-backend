@@ -51,6 +51,7 @@ async function main() {
         { conversationId: 1, timestamp: -1 },
         { organizationId: 1, timestamp: -1 },
         { organizationId: 1, type: 1, timestamp: -1 },
+        { type: 1, sender: 1, conversationId: 1 },
       ],
     ],
   ] as Array<[string, any, Array<Record<string, number>>]>) {

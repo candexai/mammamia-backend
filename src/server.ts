@@ -512,6 +512,14 @@ const startServer = async () => {
         console.log(`   Custom WhatsApp Webhook URL: http://localhost:${PORT_NUMBER}/api/v1/webhooks/whatsapp`);
       }
 
+      setImmediate(async () => {
+        try {
+          const { AdminService } = await import('./services/admin.service');
+          const adminService = new AdminService();
+          await adminService.warmDashboardUsageCache();
+        } catch (_) { /* non-fatal */ }
+      });
+
     });
 
     // ============================================================================
