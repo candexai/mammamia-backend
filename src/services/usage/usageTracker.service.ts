@@ -406,6 +406,42 @@ export class UsageTrackerService {
   }
 
   /**
+   * Usage for plan enforcement (lock / limits). Uses Profile billing-cycle counters when
+   * present so admin upgrades that reset voiceMinutesUsed take effect immediately.
+   * Display/analytics still use getOrganizationUsage() for lifetime totals.
+   */
+  async getEnforcementUsage(organizationId: string, precomputedLiveUsage?: any): Promise<{
+    callMinutes: number;
+    chatMessages: number;
+    automations: number;
+  }> {
+    const Profile = mongoose.model('Profile');
+    const profile = await Profile.findOne({
+      organizationId: new mongoose.Types.ObjectId(organizationId)
+    })
+      .select('voiceMinutesUsed chatConversationsUsed')
+      .lean();
+
+    const live =
+      precomputedLiveUsage ??
+      (await this.getOrganizationUsage(organizationId, true, { profileOnly: true }));
+
+    if (!profile) {
+      return {
+        callMinutes: live.callMinutes,
+        chatMessages: live.chatMessages,
+        automations: live.automations
+      };
+    }
+
+    return {
+      callMinutes: (profile as any).voiceMinutesUsed ?? 0,
+      chatMessages: (profile as any).chatConversationsUsed ?? 0,
+      automations: live.automations
+    };
+  }
+
+  /**
    * Check if organization has exceeded plan limits.
    * Pass `precomputedUsage` to skip a redundant getOrganizationUsage call when
    * the caller already has fresh usage data (e.g. planWarnings service).
@@ -424,7 +460,7 @@ export class UsageTrackerService {
     };
   }> {
     try {
-      const usage = precomputedUsage ?? await this.getOrganizationUsage(organizationId);
+      const usage = await this.getEnforcementUsage(organizationId, precomputedUsage);
 
       const features = getEffectiveFeatureLimits(org ?? { plan: plan?.slug }, plan);
 

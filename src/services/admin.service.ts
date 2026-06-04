@@ -584,16 +584,25 @@ export class AdminService {
     const user = await User.findById(userId);
     if (!user) throw new Error('User not found');
 
-    const plan = await Plan.findOne({ slug: profileType }).lean();
-    if (!plan) throw new Error(`Invalid plan type: ${profileType}`);
+    const planSlugByProfile: Record<string, string> = {
+      free: 'free',
+      mileva: 'mileva-pack',
+      nobel: 'nobel-pack',
+      aistein: 'aistein-pro-pack',
+      pro: 'aistein-pro-pack',
+      setup: 'set-up'
+    };
+    const planSlug = planSlugByProfile[profileType] || profileType;
+    const plan = await Plan.findOne({ slug: planSlug }).lean();
+    if (!plan) throw new Error(`Invalid plan type: ${profileType} (slug: ${planSlug})`);
 
     if (!user.organizationId) throw new Error('User has no organization');
 
     const org = await Organization.findById(user.organizationId);
     if (!org) throw new Error('Organization not found');
 
-    // Update Org Plan
-    org.plan = profileType;
+    // Update Org Plan (use DB slug so getEffectiveFeatureLimits resolves correctly)
+    org.plan = plan.slug;
     org.planId = plan._id as mongoose.Types.ObjectId;
     await org.save();
 
@@ -629,11 +638,17 @@ export class AdminService {
       await profile.save();
     }
 
-    logger.info(`✅ Upgraded organization ${org._id} (User ${userId}) to plan ${profileType} and RESET usage.`);
+    const orgId = org._id.toString();
+    await usageTrackerService.clearUsageCache(orgId);
+    const { clearOrgLockCache } = await import('../middleware/auth.middleware');
+    clearOrgLockCache(orgId);
+
+    logger.info(`✅ Upgraded organization ${org._id} (User ${userId}) to plan ${plan.slug} and RESET billing-cycle usage.`);
 
     return {
       success: true,
       plan: plan.name,
+      planSlug: plan.slug,
       planId: plan._id,
       organizationId: org._id
     };
