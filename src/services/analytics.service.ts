@@ -364,36 +364,22 @@ export class AnalyticsService {
       { $sort: { _id: 1 } }
     ]);
 
-    // Call minutes trend — use stored callDurationSeconds field, no transcript loading
+    // Call minutes trend — billing rule: transcript + metadata.duration_seconds
     const callMinutesRaw = await Conversation.aggregate([
-      { $match: { ...dateQuery, channel: 'phone' } },
       {
-        $project: {
-          period: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-          durationSeconds: {
-            $cond: {
-              if: { $and: [{ $gt: ['$callDurationSeconds', 0] }, { $lte: ['$callDurationSeconds', 7200] }] },
-              then: '$callDurationSeconds',
-              else: {
-                $cond: {
-                  if: {
-                    $and: [
-                      { $gt: [{ $subtract: ['$updatedAt', '$createdAt'] }, 0] },
-                      { $lte: [{ $subtract: ['$updatedAt', '$createdAt'] }, 7200000] }
-                    ]
-                  },
-                  then: { $divide: [{ $subtract: ['$updatedAt', '$createdAt'] }, 1000] },
-                  else: 0
-                }
-              }
-            }
-          }
+        $match: {
+          ...dateQuery,
+          transcript: { $ne: null, $exists: true }
         }
       },
       {
         $group: {
-          _id: '$period',
-          minutes: { $sum: { $ceil: { $divide: ['$durationSeconds', 60] } } }
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          minutes: {
+            $sum: {
+              $divide: [{ $ifNull: ['$metadata.duration_seconds', 0] }, 60]
+            }
+          }
         }
       },
       { $sort: { _id: 1 } }

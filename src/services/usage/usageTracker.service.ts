@@ -36,59 +36,47 @@ function localCacheSet(key: string, value: any): void {
 
 export class UsageTrackerService {
   /**
-   * Calculate call minutes from actual phone conversations.
-   *
-   * Uses the denormalized `callDurationSeconds` field when present (set at call-end),
-   * falling back to a createdAt→updatedAt difference for conversations that don't have it.
-   * Never loads transcript data into Node memory.
+   * Billing-style call seconds for an org: transcript present, sum metadata.duration_seconds.
+   */
+  private async sumOrgBillingCallSeconds(organizationId: string): Promise<{
+    totalSeconds: number;
+    documentCount: number;
+  }> {
+    const orgObjectId = new mongoose.Types.ObjectId(organizationId);
+    const [result] = await Conversation.aggregate([
+      {
+        $match: {
+          organizationId: orgObjectId,
+          transcript: { $ne: null, $exists: true }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalSeconds: { $sum: { $ifNull: ['$metadata.duration_seconds', 0] } },
+          documentCount: { $sum: 1 }
+        }
+      }
+    ]);
+
+    return {
+      totalSeconds: result?.totalSeconds ?? 0,
+      documentCount: result?.documentCount ?? 0
+    };
+  }
+
+  /**
+   * Org call minutes — same rule as billing / orgCallMinutes.ts script.
    */
   async calculateCallMinutes(organizationId: string): Promise<number> {
     try {
-      const result = await Conversation.aggregate([
-        {
-          $match: {
-            organizationId: new mongoose.Types.ObjectId(organizationId),
-            channel: 'phone'
-          }
-        },
-        {
-          $project: {
-            // Prefer explicit stored duration; fall back to updatedAt-createdAt diff capped at 2 h
-            durationSeconds: {
-              $cond: {
-                if: { $and: [{ $gt: ['$callDurationSeconds', 0] }, { $lte: ['$callDurationSeconds', 7200] }] },
-                then: '$callDurationSeconds',
-                else: {
-                  $cond: {
-                    if: {
-                      $and: [
-                        { $gt: [{ $subtract: ['$updatedAt', '$createdAt'] }, 0] },
-                        { $lte: [{ $subtract: ['$updatedAt', '$createdAt'] }, 7200000] }
-                      ]
-                    },
-                    then: { $divide: [{ $subtract: ['$updatedAt', '$createdAt'] }, 1000] },
-                    else: 0
-                  }
-                }
-              }
-            }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalSeconds: { $sum: '$durationSeconds' },
-            count: { $sum: 1 }
-          }
-        }
-      ]);
-
-      if (!result.length) return 0;
-
-      const totalMinutes = Math.ceil(result[0].totalSeconds / 60);
-      logger.info(`[Usage Tracker] Org ${organizationId}: ${totalMinutes} call minutes from ${result[0].count} phone conversations`);
-      return totalMinutes;
-
+      const { totalSeconds, documentCount } = await this.sumOrgBillingCallSeconds(organizationId);
+      const minutes = totalSeconds / 60;
+      logger.info(
+        `[Usage Tracker] Org ${organizationId}: ${minutes.toFixed(2)} call minutes ` +
+        `from ${documentCount} transcript conversations`
+      );
+      return Math.round(minutes * 100) / 100;
     } catch (error: any) {
       logger.error('[Usage Tracker] Error calculating call minutes:', error.message);
       return 0;
@@ -247,8 +235,8 @@ export class UsageTrackerService {
    * Used by auth middleware for plan-lock checks so API requests are not blocked on cold cache.
    */
   async peekUsageFromCache(organizationId: string): Promise<any | null> {
-    const fullKey = `usage:org:${organizationId}`;
-    const profileKey = `usage:org:${organizationId}:profile`;
+    const fullKey = `usage:org:${organizationId}:v2`;
+    const profileKey = `usage:org:${organizationId}:profile:v2`;
     try {
       const { default: redisClient, isRedisAvailable } = await import('../../config/redis');
       if (isRedisAvailable()) {
@@ -301,7 +289,9 @@ export class UsageTrackerService {
     try {
       const profileOnly = !!options?.profileOnly;
       const authInstant = !!options?.authInstant;
-      const cacheKey = profileOnly ? `usage:org:${organizationId}:profile` : `usage:org:${organizationId}`;
+      const cacheKey = profileOnly
+        ? `usage:org:${organizationId}:profile:v2`
+        : `usage:org:${organizationId}:v2`;
 
       if (useCache) {
         // 1. Try Redis
@@ -401,13 +391,13 @@ export class UsageTrackerService {
    * Clear usage cache for an organization (call this after significant events)
    */
   async clearUsageCache(organizationId: string): Promise<void> {
-    localUsageCache.delete(`usage:org:${organizationId}`);
-    localUsageCache.delete(`usage:org:${organizationId}:profile`);
+    localUsageCache.delete(`usage:org:${organizationId}:v2`);
+    localUsageCache.delete(`usage:org:${organizationId}:profile:v2`);
     try {
       const { default: redisClient, isRedisAvailable } = await import('../../config/redis');
       if (isRedisAvailable()) {
-        await redisClient.del(`usage:org:${organizationId}`);
-        await redisClient.del(`usage:org:${organizationId}:profile`);
+        await redisClient.del(`usage:org:${organizationId}:v2`);
+        await redisClient.del(`usage:org:${organizationId}:profile:v2`);
         logger.debug(`[Usage Tracker] Cleared usage cache for org ${organizationId}`);
       }
     } catch (error: any) {

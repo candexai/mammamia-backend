@@ -7,6 +7,7 @@ import Conversation from '../../models/Conversation';
 import mongoose from 'mongoose';
 import { logger } from '../../utils/logger.util';
 import { CallMetrics, DateRange } from './analytics.types';
+import { usageTrackerService } from '../usage/usageTracker.service';
 
 export class CallMetricsService {
   /**
@@ -137,54 +138,88 @@ export class CallMetricsService {
     dateRange?: DateRange
   ): Promise<CallMetrics> {
     try {
-      const query: any = {
-        organizationId: new mongoose.Types.ObjectId(organizationId),
+      const orgObjectId = new mongoose.Types.ObjectId(organizationId);
+      const dateFilter: Record<string, Date> = {};
+      if (dateRange?.dateFrom) dateFilter.$gte = new Date(dateRange.dateFrom);
+      if (dateRange?.dateTo) dateFilter.$lte = new Date(dateRange.dateTo);
+      const hasDateFilter = Object.keys(dateFilter).length > 0;
+
+      let totalCallMinutes: number;
+      let callsWithValidDuration = 0;
+      let documentCount = 0;
+
+      if (hasDateFilter) {
+        const match: Record<string, unknown> = {
+          organizationId: orgObjectId,
+          transcript: { $ne: null, $exists: true },
+          createdAt: dateFilter
+        };
+        const [agg] = await Conversation.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: null,
+              totalSeconds: { $sum: { $ifNull: ['$metadata.duration_seconds', 0] } },
+              documentCount: { $sum: 1 },
+              withDuration: {
+                $sum: { $cond: [{ $gt: ['$metadata.duration_seconds', 0] }, 1, 0] }
+              }
+            }
+          }
+        ]);
+        totalCallMinutes = Math.round(((agg?.totalSeconds ?? 0) / 60) * 100) / 100;
+        documentCount = agg?.documentCount ?? 0;
+        callsWithValidDuration = agg?.withDuration ?? 0;
+      } else {
+        totalCallMinutes = await usageTrackerService.calculateCallMinutes(organizationId);
+        const [stats] = await Conversation.aggregate([
+          {
+            $match: {
+              organizationId: orgObjectId,
+              transcript: { $ne: null, $exists: true }
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              documentCount: { $sum: 1 },
+              withDuration: {
+                $sum: { $cond: [{ $gt: ['$metadata.duration_seconds', 0] }, 1, 0] }
+              }
+            }
+          }
+        ]);
+        documentCount = stats?.documentCount ?? 0;
+        callsWithValidDuration = stats?.withDuration ?? 0;
+      }
+
+      const phoneQuery: Record<string, unknown> = {
+        organizationId: orgObjectId,
         channel: 'phone'
       };
+      if (hasDateFilter) phoneQuery.createdAt = dateFilter;
 
-      // Add date filter if provided
-      if (dateRange?.dateFrom || dateRange?.dateTo) {
-        query.createdAt = {};
-        if (dateRange.dateFrom) {
-          query.createdAt.$gte = new Date(dateRange.dateFrom);
-        }
-        if (dateRange.dateTo) {
-          query.createdAt.$lte = new Date(dateRange.dateTo);
-        }
-      }
+      const [totalCalls, callsWithTranscript, callsWithoutTranscript] = await Promise.all([
+        Conversation.countDocuments(phoneQuery),
+        Conversation.countDocuments({
+          ...phoneQuery,
+          transcript: { $ne: null, $exists: true }
+        }),
+        Conversation.countDocuments({
+          ...phoneQuery,
+          $or: [{ transcript: null }, { transcript: { $exists: false } }]
+        })
+      ]);
 
-      const phoneConversations = await Conversation.find(query)
-        .select('transcript metadata createdAt updatedAt')
-        .lean();
-
-      let totalCallMinutes = 0;
-      let callsWithTranscript = 0;
-      let callsWithoutTranscript = 0;
-      let callsWithValidDuration = 0;
-
-      for (const conv of phoneConversations) {
-        const duration = this.getCallDuration(conv);
-
-        if (duration !== null && duration > 0) {
-          totalCallMinutes += duration;
-          callsWithValidDuration++;
-        }
-
-        if (conv.transcript && conv.transcript.items && conv.transcript.items.length > 0) {
-          callsWithTranscript++;
-        } else {
-          callsWithoutTranscript++;
-        }
-      }
-
-      const totalCalls = phoneConversations.length;
-      const averageCallDuration = callsWithValidDuration > 0 ? totalCallMinutes / callsWithValidDuration : 0;
+      const averageCallDuration = callsWithValidDuration > 0
+        ? Math.round((totalCallMinutes / callsWithValidDuration) * 100) / 100
+        : 0;
 
       return {
         totalCallMinutes,
         totalCalls,
         callsWithValidDuration,
-        averageCallDuration: Math.round(averageCallDuration * 100) / 100, // Round to 2 decimals
+        averageCallDuration,
         callsWithTranscript,
         callsWithoutTranscript
       };
