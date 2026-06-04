@@ -15,7 +15,7 @@ import Plan from '../models/Plan';
 
 const ADMIN_DASHBOARD_CACHE_TTL_SEC = 300;
 const ADMIN_DASHBOARD_CACHE_KEY = 'admin:dashboard:counts:v1';
-const ADMIN_USAGE_CACHE_KEY = 'admin:dashboard:usage:v2';
+const ADMIN_USAGE_CACHE_KEY = 'admin:dashboard:usage:v3';
 
 const localAdminCache = new Map<string, { value: any; expiresAt: number }>();
 
@@ -139,11 +139,15 @@ export class AdminService {
    */
   async warmDashboardUsageCache(): Promise<void> {
     try {
-      const existing = await redisGet(ADMIN_USAGE_CACHE_KEY);
-      if (existing) {
-        logger.info('[Admin] Dashboard usage cache already warm');
-        return;
-      }
+      // Always recompute on deploy — do not reuse a prior { callMinutes: 0 } cache entry.
+      try {
+        const { default: redisClient, isRedisAvailable } = await import('../config/redis');
+        if (isRedisAvailable()) {
+          await redisClient.del(ADMIN_USAGE_CACHE_KEY);
+        }
+      } catch (_) { /* non-fatal */ }
+      localAdminCache.delete(ADMIN_USAGE_CACHE_KEY);
+
       await this.getDashboardUsage();
       logger.info('[Admin] Dashboard usage cache warmed');
     } catch (error: any) {
@@ -189,7 +193,10 @@ export class AdminService {
       return {
         ...counts,
         totalCallMinutes: usage.callMinutes,
-        totalChatConversations: usage.chatConversations
+        totalChatConversations: usage.chatConversations,
+        // Aliases for frontends that read usage-shaped fields from /dashboard/metrics
+        callMinutes: usage.callMinutes,
+        chatConversations: usage.chatConversations
       };
     } catch (error: any) {
       logger.error('Failed to get dashboard metrics', { error: error.message });

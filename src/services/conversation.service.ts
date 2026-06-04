@@ -1055,20 +1055,25 @@ export class ConversationService {
 
       // Update conversation with transcript
       conversation.transcript = callDocument.transcript;
+      const rawDuration = callDocument.metadata?.duration_seconds
+        || callDocument.metadata?.call_duration_secs
+        || callDocument.metadata?.duration;
+      const durationSeconds = rawDuration && Number(rawDuration) > 0 ? Number(rawDuration) : null;
+
       conversation.metadata = {
         ...conversation.metadata,
         duration: callDocument.metadata?.duration_formatted,
+        ...(durationSeconds != null && {
+          duration_seconds: durationSeconds,
+          call_duration_secs: durationSeconds
+        }),
         callCompletedAt: callDocument.timestamp,
         roomName: callDocument.metadata?.room_name,
         recording_url: callDocument.metadata?.recording_url || callDocument.recording_url || null
       };
 
-      // Store duration so usage queries never need to load transcript data
-      const rawDuration = callDocument.metadata?.duration_seconds
-        || callDocument.metadata?.call_duration_secs
-        || callDocument.metadata?.duration;
-      if (rawDuration && Number(rawDuration) > 0) {
-        (conversation as any).callDurationSeconds = Number(rawDuration);
+      if (durationSeconds != null) {
+        (conversation as any).callDurationSeconds = durationSeconds;
       }
 
       // CRITICAL: Don't update 'updatedAt' when refreshing transcript

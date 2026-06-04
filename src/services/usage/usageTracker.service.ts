@@ -470,7 +470,9 @@ export class UsageTrackerService {
 
   /**
    * Platform-wide call minutes for admin dashboard.
-   * Matches IslandAI billing script: conversations with transcript, sum metadata.duration_seconds.
+   * Base rule: conversations with transcript (same as IslandAI billing script).
+   * Duration: metadata.duration_seconds first, then call_duration_secs / callDurationSeconds
+   * (many code paths only denormalize to callDurationSeconds).
    */
   async calculatePlatformCallMinutes(): Promise<number> {
     try {
@@ -481,20 +483,42 @@ export class UsageTrackerService {
           }
         },
         {
+          $addFields: {
+            durationSeconds: {
+              $convert: {
+                input: {
+                  $ifNull: [
+                    '$metadata.duration_seconds',
+                    { $ifNull: ['$metadata.call_duration_secs', '$callDurationSeconds'] }
+                  ]
+                },
+                to: 'double',
+                onError: 0,
+                onNull: 0
+              }
+            }
+          }
+        },
+        {
           $group: {
             _id: null,
-            totalSeconds: { $sum: { $ifNull: ['$metadata.duration_seconds', 0] } },
-            documentCount: { $sum: 1 }
+            totalSeconds: { $sum: '$durationSeconds' },
+            documentCount: { $sum: 1 },
+            withDuration: { $sum: { $cond: [{ $gt: ['$durationSeconds', 0] }, 1, 0] } }
           }
         }
       ]);
 
-      if (!result.length) return 0;
+      if (!result.length) {
+        logger.warn('[Usage Tracker] Platform call minutes: no transcript conversations matched');
+        return 0;
+      }
 
       const totalSeconds = result[0].totalSeconds || 0;
       const minutes = totalSeconds / 60;
       logger.info(
-        `[Usage Tracker] Platform call minutes: ${minutes.toFixed(2)} from ${result[0].documentCount} transcript conversations`
+        `[Usage Tracker] Platform call minutes: ${minutes.toFixed(2)} ` +
+        `(${result[0].withDuration}/${result[0].documentCount} docs with duration, db=${mongoose.connection.db?.databaseName})`
       );
       return Math.round(minutes * 100) / 100;
     } catch (error: any) {
