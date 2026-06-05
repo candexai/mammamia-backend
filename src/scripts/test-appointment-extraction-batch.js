@@ -8,8 +8,7 @@
  *   ORG_ID=69ca55bef0174d1308e92b6d node src/scripts/test-appointment-extraction-batch.js
  *
  * Env:
- *   PYTHON_API_URL — default https://elvenlabs-voiceagent.onrender.com
- *   ORG_ID — only needed if Python fails and local fallback runs
+ *   PYTHON_API_URL — default https://eleven.candexai.co.in (shared Python service)
  */
 
 require('dotenv').config();
@@ -105,7 +104,7 @@ async function main() {
 
   console.log('='.repeat(72));
   console.log('Appointment extraction batch test (Python extract-data API)');
-  console.log('PYTHON_API_URL:', process.env.PYTHON_API_URL || process.env.COMM_API_URL || 'https://elvenlabs-voiceagent.onrender.com');
+  console.log('PYTHON_API_URL:', process.env.PYTHON_API_URL || process.env.COMM_API_URL || 'https://eleven.candexai.co.in');
   console.log('Conversations:', conversationIds.join(', '));
   console.log('='.repeat(72));
 
