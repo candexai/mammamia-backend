@@ -630,8 +630,8 @@ export class ElevenLabsWebhookController {
       // is an occasional ~2–5s propagation gap where the API serves an empty result
       // even after the webhook fires. When the webhook transcript is empty (but the
       // call had real duration), we wait briefly and fetch once from the ElevenLabs
-      // conversation API before saving to Mongo. This protects the local-LLM fallback
-      // path in extraction which reads transcript from the DB.
+      // conversation API before saving to Mongo so appointment extraction has a
+      // transcript available when automations run after this webhook.
       let finalTranscript = webhookTranscript;
       if (webhookTranscript.length === 0 && elevenLabsConvId && duration > 0) {
         console.log(
