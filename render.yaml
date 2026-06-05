@@ -15,9 +15,5 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
-      - key: PYTHON_API_URL
-        value: https://eleven.candexai.co.in
-      - key: COMM_API_URL
-        value: https://eleven.candexai.co.in
     healthCheckPath: /api/v1/health
 
